@@ -1126,7 +1126,8 @@ class Logger::Impl {
 
         // Format timezone as +HH:MM or -HH:MM (ISO 8601)
         std::array<char, 10> tz_offset{};
-        std::snprintf(tz_offset.data(), tz_offset.size(), "%+03d:%02d", offset_hours, offset_minutes);
+        std::snprintf(tz_offset.data(), tz_offset.size(), "%+03d:%02d", offset_hours,
+                      offset_minutes);
 
         // ========================================================================
         // Format Log Entry for File (Plain Text, No Colors)
@@ -1134,7 +1135,8 @@ class Logger::Impl {
 
         std::ostringstream file_ss;
         file_ss << std::put_time(&local_tm, "[%Y-%m-%d %H:%M:%S") << '.' << std::setfill('0')
-                << std::setw(3) << ms.count() << " " << tz_offset.data() << "] " // Add timezone offset
+                << std::setw(3) << ms.count() << " " << tz_offset.data()
+                << "] " // Add timezone offset
                 << "[" << levelToString(level) << "] "
                 << "[" << loc.file_name() << ":" << loc.line() << "] " << msg << std::endl;
 
@@ -1154,8 +1156,8 @@ class Logger::Impl {
                 std::ostringstream console_ss;
                 console_ss << AnsiColors::BRIGHT_BLACK
                            << std::put_time(&local_tm, "[%Y-%m-%d %H:%M:%S") << '.'
-                           << std::setfill('0') << std::setw(3) << ms.count() << " " << tz_offset.data()
-                           << "] " // Add timezone offset
+                           << std::setfill('0') << std::setw(3) << ms.count() << " "
+                           << tz_offset.data() << "] " // Add timezone offset
                            << AnsiColors::RESET << getLevelColor(level) << AnsiColors::BOLD << "["
                            << levelToString(level) << "] " << AnsiColors::RESET
                            << AnsiColors::BRIGHT_BLACK << "[" << loc.file_name() << ":"
