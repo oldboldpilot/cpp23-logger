@@ -16,7 +16,7 @@ A production-grade, thread-safe logging system with Mustache-style named templat
 ## Requirements
 
 - **Compiler**: Clang 17+, GCC 14+, or MSVC 19.34+ (VS 2022 17.4)
-- **CMake**: 3.28 or higher
+- **Build System**: CMake 3.28+ or Bazel 7.0+
 - **C++ Standard**: C++23 with modules support
 
 ## Quick Start
@@ -36,6 +36,36 @@ FetchContent_MakeAvailable(logger)
 
 # Link to your target
 target_link_libraries(your_target PRIVATE logger)
+```
+
+### Installation via Bazel
+
+In your `WORKSPACE` file:
+
+```python
+load("@bazel_tools//tools/build_defs/repo:git.bzl", "git_repository")
+
+git_repository(
+    name = "cpp23_logger",
+    remote = "https://github.com/YOUR_USERNAME/cpp23-logger.git",
+    tag = "v1.0.0",
+)
+```
+
+In your `BUILD.bazel` file:
+
+```python
+cc_binary(
+    name = "my_app",
+    srcs = ["main.cpp"],
+    deps = ["@cpp23_logger//:logger"],
+)
+```
+
+Build your project:
+
+```bash
+bazel build //:my_app
 ```
 
 ### Basic Usage
