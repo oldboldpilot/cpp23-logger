@@ -625,6 +625,13 @@ class Logger {
         using NestedArray = std::vector<TemplateValue>;
 
         /**
+         * Default constructor - creates empty string value
+         *
+         * Required for use with std::unordered_map::operator[]
+         */
+        TemplateValue() : value_{std::make_shared<std::string const>("")} {}
+
+        /**
          * Type-safe constructor for loggable values
          *
          * TYPE SAFETY (C++20 Concepts):
@@ -819,6 +826,64 @@ class Logger {
             return (index < array.size()) ? &array[index] : nullptr;
         }
 
+        /**
+         * Get size of nested collection (array or map)
+         *
+         * Returns the number of elements in the collection.
+         * For non-collection types, returns 0.
+         *
+         * @return Size of array/map, or 0 for simple values
+         */
+        [[nodiscard]] auto size() const -> std::size_t {
+            if (isArray()) {
+                return std::get<NestedArray>(value_).size();
+            }
+            if (isMap()) {
+                return std::get<NestedMap>(value_).size();
+            }
+            return 0;
+        }
+
+        /**
+         * Check if collection is empty
+         *
+         * Returns true if:
+         * - This is an array with 0 elements
+         * - This is a map with 0 entries
+         * - This is a simple value (not a collection)
+         *
+         * @return true if empty or not a collection, false if non-empty collection
+         */
+        [[nodiscard]] auto empty() const -> bool {
+            if (isArray()) {
+                return std::get<NestedArray>(value_).empty();
+            }
+            if (isMap()) {
+                return std::get<NestedMap>(value_).empty();
+            }
+            return true;
+        }
+
+        /**
+         * Get const reference to underlying array
+         *
+         * @return Const reference to NestedArray
+         * @throws std::bad_variant_access if this is not an array
+         */
+        [[nodiscard]] auto getArray() const -> NestedArray const& {
+            return std::get<NestedArray>(value_);
+        }
+
+        /**
+         * Get const reference to underlying map
+         *
+         * @return Const reference to NestedMap
+         * @throws std::bad_variant_access if this is not a map
+         */
+        [[nodiscard]] auto getMap() const -> NestedMap const& {
+            return std::get<NestedMap>(value_);
+        }
+
       private:
         /// Convert value to string using ostringstream (type-safe with concept check)
         template <LoggableValue T>
@@ -969,6 +1034,316 @@ class Logger {
     }
 
     /**
+     * Find matching closing section tag for a section
+     *
+     * Given a template string starting after the opening {{#name}}, finds
+     * the matching {{/name}} closing tag, handling nested sections correctly.
+     *
+     * @param template_str Template string to search
+     * @param section_name Name of the section to match
+     * @return Position of the matching {{/ tag, or npos if not found
+     */
+    [[nodiscard]] static auto findMatchingClosingTag(std::string_view template_str,
+                                                     std::string_view section_name) -> std::size_t {
+        std::size_t pos = 0;
+        int depth = 1; // We're already inside one section
+
+        while (pos < template_str.size() && depth > 0) {
+            auto const open_pos = template_str.find("{{#", pos);
+            auto const close_pos = template_str.find("{{/", pos);
+
+            if (close_pos == std::string_view::npos) {
+                // No closing tag found
+                return std::string_view::npos;
+            }
+
+            if (open_pos != std::string_view::npos && open_pos < close_pos) {
+                // Found nested opening tag first
+                depth++;
+                pos = open_pos + 3;
+            } else {
+                // Found closing tag
+                // Verify it matches our section name
+                auto const tag_end = template_str.find("}}", close_pos + 3);
+                if (tag_end != std::string_view::npos) {
+                    auto const tag_name =
+                        template_str.substr(close_pos + 3, tag_end - close_pos - 3);
+                    if (tag_name == section_name) {
+                        depth--;
+                        if (depth == 0) {
+                            return close_pos;
+                        }
+                    }
+                }
+                pos = close_pos + 3;
+            }
+        }
+
+        return std::string_view::npos;
+    }
+
+    /**
+     * Process a section iteration ({{#name}}...{{/name}})
+     *
+     * Renders the section content once for each item in the collection,
+     * providing context variables for iteration state.
+     *
+     * Context variables available during iteration:
+     * - @index: Current 0-based index (for arrays)
+     * - @first: true if this is the first iteration
+     * - @last: true if this is the last iteration
+     * - @key: Current key (for map iteration)
+     * - @value: Current item value
+     *
+     * @param section_content Template content inside the section tags
+     * @param value Collection to iterate over (array or map)
+     * @param base_params Base parameter map (inherited from parent scope)
+     * @return Rendered section content with all iterations concatenated
+     */
+    [[nodiscard]] static auto processSection(std::string_view section_content,
+                                             TemplateValue const& value,
+                                             TemplateParams const& base_params) -> std::string {
+        std::ostringstream result;
+
+        if (value.isArray()) {
+            // Array iteration
+            auto const& array = value.getArray();
+            auto const size = array.size();
+
+            for (std::size_t i = 0; i < size; ++i) {
+                // Create iteration context with context variables
+                TemplateParams iteration_params = base_params;
+                iteration_params["@index"] = TemplateValue{static_cast<int>(i)};
+                iteration_params["@first"] = TemplateValue{i == 0 ? "true" : "false"};
+                iteration_params["@last"] = TemplateValue{i == size - 1 ? "true" : "false"};
+                iteration_params["@value"] = array[i];
+
+                // Process section content with iteration context
+                result << processTemplate(section_content, iteration_params);
+            }
+        } else if (value.isMap()) {
+            // Map iteration
+            auto const& map = value.getMap();
+            auto const size = map.size();
+            std::size_t i = 0;
+
+            for (auto const& [key, val] : map) {
+                // Create iteration context with context variables
+                TemplateParams iteration_params = base_params;
+                iteration_params["@index"] = TemplateValue{static_cast<int>(i)};
+                iteration_params["@first"] = TemplateValue{i == 0 ? "true" : "false"};
+                iteration_params["@last"] = TemplateValue{i == size - 1 ? "true" : "false"};
+                iteration_params["@key"] = TemplateValue{key};
+                iteration_params["@value"] = val;
+
+                // Process section content with iteration context
+                result << processTemplate(section_content, iteration_params);
+                ++i;
+            }
+        }
+
+        return result.str();
+    }
+
+    /**
+     * FILTER AND FUNCTIONAL OPERATION HELPERS
+     *
+     * These functions transform TemplateValue arrays and can be used
+     * to prepare data before passing to templates.
+     */
+
+    /**
+     * Reverse an array
+     *
+     * @param value Array to reverse
+     * @return New TemplateValue with reversed array
+     */
+    [[nodiscard]] static auto reverse(TemplateValue const& value) -> TemplateValue {
+        if (!value.isArray()) {
+            return value;
+        }
+
+        auto const& array = value.getArray();
+        TemplateValue::NestedArray reversed(array.rbegin(), array.rend());
+        return TemplateValue{std::move(reversed)};
+    }
+
+    /**
+     * Slice an array
+     *
+     * @param value Array to slice
+     * @param start Start index (inclusive)
+     * @param end End index (exclusive), or npos for end of array
+     * @return New TemplateValue with sliced array
+     */
+    [[nodiscard]] static auto slice(TemplateValue const& value, std::size_t start,
+                                    std::size_t end = std::string_view::npos) -> TemplateValue {
+        if (!value.isArray()) {
+            return value;
+        }
+
+        auto const& array = value.getArray();
+        auto const size = array.size();
+
+        // Clamp indices
+        start = std::min(start, size);
+        end = (end == std::string_view::npos) ? size : std::min(end, size);
+
+        if (start >= end) {
+            return TemplateValue{TemplateValue::NestedArray{}};
+        }
+
+        TemplateValue::NestedArray sliced(array.begin() + static_cast<std::ptrdiff_t>(start),
+                                          array.begin() + static_cast<std::ptrdiff_t>(end));
+        return TemplateValue{std::move(sliced)};
+    }
+
+    /**
+     * Zip two arrays together
+     *
+     * Creates an array of pairs from two input arrays.
+     * The result length is the minimum of the two input lengths.
+     *
+     * @param value1 First array
+     * @param value2 Second array
+     * @return New TemplateValue with array of maps containing {first, second} keys
+     */
+    [[nodiscard]] static auto zip(TemplateValue const& value1, TemplateValue const& value2)
+        -> TemplateValue {
+        if (!value1.isArray() || !value2.isArray()) {
+            return TemplateValue{TemplateValue::NestedArray{}};
+        }
+
+        auto const& array1 = value1.getArray();
+        auto const& array2 = value2.getArray();
+        auto const size = std::min(array1.size(), array2.size());
+
+        TemplateValue::NestedArray result;
+        result.reserve(size);
+
+        for (std::size_t i = 0; i < size; ++i) {
+            TemplateValue::NestedMap pair;
+            pair["first"] = array1[i];
+            pair["second"] = array2[i];
+            result.push_back(TemplateValue{std::move(pair)});
+        }
+
+        return TemplateValue{std::move(result)};
+    }
+
+    /**
+     * Check if all elements in array match a condition (non-empty string)
+     *
+     * @param value Array to check
+     * @return TemplateValue with "true" or "false"
+     */
+    [[nodiscard]] static auto all(TemplateValue const& value) -> TemplateValue {
+        if (!value.isArray()) {
+            return TemplateValue{"false"};
+        }
+
+        auto const& array = value.getArray();
+        for (auto const& item : array) {
+            auto const str = item.toString();
+            if (str.empty() || str == "false" || str == "0") {
+                return TemplateValue{"false"};
+            }
+        }
+
+        return TemplateValue{"true"};
+    }
+
+    /**
+     * Check if no elements in array match a condition (all empty or false)
+     *
+     * @param value Array to check
+     * @return TemplateValue with "true" or "false"
+     */
+    [[nodiscard]] static auto none(TemplateValue const& value) -> TemplateValue {
+        if (!value.isArray()) {
+            return TemplateValue{"true"};
+        }
+
+        auto const& array = value.getArray();
+        for (auto const& item : array) {
+            auto const str = item.toString();
+            if (!str.empty() && str != "false" && str != "0") {
+                return TemplateValue{"false"};
+            }
+        }
+
+        return TemplateValue{"true"};
+    }
+
+    /**
+     * Logical not - flip true/false
+     *
+     * @param value Value to negate
+     * @return TemplateValue with "true" or "false"
+     */
+    [[nodiscard]] static auto not_(TemplateValue const& value) -> TemplateValue {
+        auto const str = value.toString();
+        bool const is_truthy =
+            !str.empty() && str != "false" && str != "0" && str != "False" && str != "FALSE";
+        return TemplateValue{is_truthy ? "false" : "true"};
+    }
+
+    /**
+     * JSON CONSTRUCTION HELPERS
+     *
+     * These functions help construct JSON-like nested structures easily.
+     */
+
+    /**
+     * Create a JSON-like object (map)
+     *
+     * Helper to create nested map structures using initializer lists.
+     *
+     * @param init Initializer list of key-value pairs
+     * @return TemplateValue containing the map
+     *
+     * Example:
+     * ```cpp
+     * auto user = json({
+     *     {"name", "Alice"},
+     *     {"age", 30},
+     *     {"email", "alice@example.com"}
+     * });
+     * ```
+     */
+    [[nodiscard]] static auto
+    json(std::initializer_list<std::pair<std::string, TemplateValue>> init) -> TemplateValue {
+        TemplateValue::NestedMap map;
+        for (auto const& [key, value] : init) {
+            map.emplace(key, value);
+        }
+        return TemplateValue{std::move(map)};
+    }
+
+    /**
+     * Create a JSON-like array
+     *
+     * Helper to create array structures using initializer lists.
+     *
+     * @param init Initializer list of values
+     * @return TemplateValue containing the array
+     *
+     * Example:
+     * ```cpp
+     * auto colors = jsonArray({
+     *     TemplateValue{"red"},
+     *     TemplateValue{"green"},
+     *     TemplateValue{"blue"}
+     * });
+     * ```
+     */
+    [[nodiscard]] static auto jsonArray(std::initializer_list<TemplateValue> init)
+        -> TemplateValue {
+        TemplateValue::NestedArray array(init);
+        return TemplateValue{std::move(array)};
+    }
+
+    /**
      * Process Mustache-style template with named parameters (supports dot notation)
      *
      * Replaces all occurrences of {param_name} with corresponding values
@@ -1028,6 +1403,58 @@ class Logger {
             // Append text before placeholder
             result << remaining.substr(0, start_pos);
 
+            // Check if this is a section tag {{# or {{/
+            if (start_pos + 2 < remaining.size() && remaining[start_pos + 1] == '{') {
+                // This is a double-brace tag - could be section
+                if (start_pos + 3 < remaining.size() && remaining[start_pos + 2] == '#') {
+                    // Section start: {{#name}}
+                    auto const tag_end = remaining.find("}}", start_pos + 3);
+                    if (tag_end == std::string_view::npos) {
+                        // Malformed tag - append as-is
+                        result << remaining.substr(start_pos);
+                        break;
+                    }
+
+                    // Extract section name
+                    auto const section_name =
+                        remaining.substr(start_pos + 3, tag_end - start_pos - 3);
+
+                    // Find matching closing tag
+                    auto const content_start = tag_end + 2;
+                    auto const close_pos =
+                        findMatchingClosingTag(remaining.substr(content_start), section_name);
+
+                    if (close_pos == std::string_view::npos) {
+                        // No matching closing tag - append as-is
+                        result << remaining.substr(start_pos);
+                        break;
+                    }
+
+                    // Extract section content
+                    auto const section_content = remaining.substr(content_start, close_pos);
+
+                    // Resolve the section value
+                    auto const* section_value = resolveNestedValue(params, section_name);
+
+                    if (section_value != nullptr) {
+                        // Process section with iteration
+                        result << processSection(section_content, *section_value, params);
+                    }
+
+                    // Find the end of the closing tag
+                    auto const closing_tag_end =
+                        remaining.find("}}", content_start + close_pos + 3);
+                    if (closing_tag_end != std::string_view::npos) {
+                        // Move past the closing tag
+                        remaining = remaining.substr(closing_tag_end + 2);
+                    } else {
+                        break;
+                    }
+                    continue;
+                }
+            }
+
+            // Not a section tag - process as regular placeholder
             // Find placeholder end
             auto const end_pos = remaining.find('}', start_pos);
 
