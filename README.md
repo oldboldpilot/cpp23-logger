@@ -190,7 +190,7 @@ ctest --test-dir build
 
 ## License
 
-Proprietary. See [LICENSE](LICENSE) for details.
+BSD 4-Clause License with Author's Special Rights. See [LICENSE](LICENSE) for details.
 
 ## Author
 

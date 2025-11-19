@@ -92,8 +92,9 @@ target_include_directories(logger
 find_package(Threads REQUIRED)
 target_link_libraries(logger PUBLIC Threads::Threads)
 
-# Set module output directory
+# Set module output directory and enable position-independent code for shared library linking
 set_target_properties(logger PROPERTIES
+    POSITION_INDEPENDENT_CODE ON
     LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
     ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
 )
