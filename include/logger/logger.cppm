@@ -182,6 +182,8 @@ concept StringConvertible =
  * Concept: LoggableValue
  * Top-level constraint for values that can be logged
  * Combines StringConvertible with additional safety checks
+ * Allows: fundamental types, strings, const char*, char* (for C APIs), and streamable types
+ * Prevents: arbitrary pointer types (security risk)
  */
 template <typename T>
 concept LoggableValue =
@@ -189,7 +191,8 @@ concept LoggableValue =
     (std::is_copy_constructible_v<std::remove_cvref_t<T>> ||
      std::is_move_constructible_v<std::remove_cvref_t<T>>) &&
     (!std::is_pointer_v<std::remove_cvref_t<T>> ||
-     std::is_same_v<std::remove_cvref_t<T>, char const*>);
+     std::is_same_v<std::remove_cvref_t<T>, char const*> ||
+     std::is_same_v<std::remove_cvref_t<T>, char*>);
 
 /**
  * ============================================================================
