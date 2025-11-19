@@ -16,6 +16,7 @@ import logger;
 #include <cassert>
 #include <iostream>
 #include <map>
+#include <span>
 #include <string>
 #include <unordered_map>
 
@@ -283,6 +284,42 @@ auto test_std_array() -> void {
     std::cout << "  ✓ std::array access: " << result << "\n";
 }
 
+// Test 11.5: Span support with std::span
+auto test_std_span() -> void {
+    std::cout << "Test 11.5: Span support with std::span...\n";
+
+    // Create source data
+    TemplateValue::NestedArray source_data;
+    source_data.push_back(TemplateValue{"Red"});
+    source_data.push_back(TemplateValue{"Green"});
+    source_data.push_back(TemplateValue{"Blue"});
+    source_data.push_back(TemplateValue{"Yellow"});
+
+    // Create span view over source data
+    std::span<TemplateValue> colors_span{source_data};
+
+    Logger::TemplateParams params;
+    params.emplace("colors", TemplateValue{colors_span});
+
+    auto const result = Logger::processTemplate(
+        "Primary: {colors.0}, Secondary: {colors.1}, Tertiary: {colors.2}, Extra: {colors.3}",
+        params);
+
+    assert(result == "Primary: Red, Secondary: Green, Tertiary: Blue, Extra: Yellow");
+    std::cout << "  ✓ std::span access: " << result << "\n";
+
+    // Test with partial span (subview)
+    std::span<TemplateValue> primary_colors = colors_span.subspan(0, 3);
+    Logger::TemplateParams params2;
+    params2.emplace("primary", TemplateValue{primary_colors});
+
+    auto const result2 =
+        Logger::processTemplate("Primaries: {primary.0}, {primary.1}, {primary.2}", params2);
+
+    assert(result2 == "Primaries: Red, Green, Blue");
+    std::cout << "  ✓ std::span subspan access: " << result2 << "\n";
+}
+
 // Test 12: Mixed map and array nesting
 auto test_mixed_map_array_nesting() -> void {
     std::cout << "Test 12: Mixed map and array nesting...\n";
@@ -445,6 +482,7 @@ auto main() -> int {
         // Array tests
         test_vector_arrays();
         test_std_array();
+        test_std_span();
         test_mixed_map_array_nesting();
         test_array_of_arrays();
         test_real_world_market_data();

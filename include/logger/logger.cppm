@@ -131,6 +131,7 @@ module;
 #include <memory>
 #include <mutex>
 #include <source_location>
+#include <span>
 #include <sstream>
 #include <string>
 #include <string_view>
@@ -598,11 +599,15 @@ class Logger {
      * user_map["id"] = TemplateValue{12345};
      * TemplateValue nested_val{std::move(user_map)};
      *
-     * // Array of values
+     * // Array of values (std::vector)
      * TemplateValue::NestedArray items;
      * items.push_back(TemplateValue{"Item1"});
      * items.push_back(TemplateValue{"Item2"});
      * TemplateValue array_val{std::move(items)};
+     *
+     * // Span view (std::span - non-owning)
+     * std::span<TemplateValue> span_view{items};
+     * TemplateValue span_val{span_view};  // Copies elements from span
      *
      * // Access nested value by key
      * auto* name = nested_val.get("name");  // Returns TemplateValue* pointing to "Alice"
@@ -681,16 +686,21 @@ class Logger {
         }
 
         /**
-         * Constructor for array values (std::vector or std::array)
+         * Constructor for array values (std::vector, std::array, std::span)
          *
          * Enables array/list structures for sequential data logging.
          * Supports index notation access like {items.0} or {users.1}.
          *
-         * Accepts std::vector<TemplateValue> and std::array<TemplateValue, N>.
+         * Accepts any contiguous container with TemplateValue elements:
+         * - std::vector<TemplateValue>: Dynamic arrays
+         * - std::array<TemplateValue, N>: Fixed-size arrays
+         * - std::span<TemplateValue>: Non-owning views over contiguous sequences
+         *
          * Internally stores as NestedArray (std::vector) for consistent interface.
          *
-         * @tparam ArrayType Either std::vector or std::array of TemplateValue
-         * @param arr Array of TemplateValue elements
+         * @tparam ArrayType std::vector, std::array, std::span, or any container with value_type =
+         * TemplateValue
+         * @param arr Array or span of TemplateValue elements
          *
          * Examples:
          * ```cpp
@@ -708,6 +718,11 @@ class Logger {
          *     TemplateValue{"Charlie"}
          * };
          * TemplateValue users_val{users};  // Copied from std::array
+         *
+         * // Using std::span (non-owning view)
+         * std::vector<TemplateValue> data = {...};
+         * std::span<TemplateValue> view{data};
+         * TemplateValue span_val{view};  // Copied from span
          * ```
          */
         template <typename ArrayType>
