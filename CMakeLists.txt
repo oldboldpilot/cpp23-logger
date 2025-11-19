@@ -32,7 +32,6 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
     endif()
     # Clang C++23 modules flags
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++23 -stdlib=libc++")
-    set(CMAKE_CXX_MODULE_STD 1)
 
 elseif(CMAKE_CXX_COMPILER_ID MATCHES "GNU")
     if(CMAKE_CXX_COMPILER_VERSION VERSION_LESS "14.0")
