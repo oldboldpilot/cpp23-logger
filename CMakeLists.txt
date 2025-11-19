@@ -80,6 +80,7 @@ target_sources(logger
         FILE_SET CXX_MODULES
         FILES
             include/logger/logger.cppm
+            include/logger/code_generator.cppm
 )
 
 target_include_directories(logger
