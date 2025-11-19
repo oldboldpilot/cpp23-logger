@@ -95,7 +95,6 @@ target_link_libraries(logger PUBLIC Threads::Threads)
 
 # Set module output directory
 set_target_properties(logger PROPERTIES
-    CXX_MODULE_SET_BUILD_INTERFACE_FILE_SET_NAME cxx_modules
     LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
     ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
 )
