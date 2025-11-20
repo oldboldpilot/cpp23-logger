@@ -44,15 +44,16 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
     if(CMAKE_CXX_COMPILER_VERSION VERSION_LESS "17.0")
         message(FATAL_ERROR "Clang 17.0 or higher required for C++23 modules support")
     endif()
-    # Clang C++23 modules flags
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++23 -stdlib=libc++")
+    # Clang C++23 modules flags with CPU architecture optimizations
+    # Match parent project's CPU flags to ensure module compatibility
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++23 -stdlib=libc++ -march=native -mavx512f -mavx512dq -mavx512bw -mavx512vl -mavx2 -mfma")
 
 elseif(CMAKE_CXX_COMPILER_ID MATCHES "GNU")
     if(CMAKE_CXX_COMPILER_VERSION VERSION_LESS "14.0")
         message(FATAL_ERROR "GCC 14.0 or higher required for C++23 modules support")
     endif()
-    # GCC C++23 modules flags
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++23 -fmodules-ts")
+    # GCC C++23 modules flags with CPU architecture optimizations
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++23 -fmodules-ts -march=native -mavx512f -mavx512dq -mavx512bw -mavx512vl -mavx2 -mfma")
 
 elseif(CMAKE_CXX_COMPILER_ID MATCHES "MSVC")
     if(CMAKE_CXX_COMPILER_VERSION VERSION_LESS "19.34")
