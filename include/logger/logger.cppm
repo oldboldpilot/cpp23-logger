@@ -942,7 +942,7 @@ class Logger {
     [[nodiscard]] static auto parseIndex(std::string_view str) -> std::size_t {
         std::size_t result = 0;
         for (char const c : str) {
-            result = result * 10 + static_cast<std::size_t>(c - '0');
+            result = (result * 10) + static_cast<std::size_t>(c - '0');
         }
         return result;
     }
@@ -1564,7 +1564,7 @@ class Logger {
             auto tuple = std::forward_as_tuple(std::forward<Args>(args)...);
 
             // Process each pair: (tuple[0], tuple[1]), (tuple[2], tuple[3]), ...
-            (add_pair(std::get<Is * 2>(tuple), std::get<Is * 2 + 1>(tuple)), ...);
+            (add_pair(std::get<Is * 2>(tuple), std::get<(Is * 2) + 1>(tuple)), ...);
         };
 
         // Generate index sequence for pairs: 0, 1, 2, ... (half the number of args)
