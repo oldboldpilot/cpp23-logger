@@ -50,9 +50,10 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++23 -stdlib=libc++")
 
     # Optional: Add native CPU optimizations if requested by parent project
+    # NOTE: -march=native automatically detects and uses only CPU-supported instructions
     if(ENABLE_NATIVE_OPTIMIZATIONS)
         message(STATUS "Enabling native CPU optimizations for module compatibility")
-        set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -march=native -mavx512f -mavx512dq -mavx512bw -mavx512vl -mavx2 -mfma")
+        set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -march=native")
     endif()
 
 elseif(CMAKE_CXX_COMPILER_ID MATCHES "GNU")
@@ -63,9 +64,10 @@ elseif(CMAKE_CXX_COMPILER_ID MATCHES "GNU")
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++23 -fmodules-ts")
 
     # Optional: Add native CPU optimizations if requested by parent project
+    # NOTE: -march=native automatically detects and uses only CPU-supported instructions
     if(ENABLE_NATIVE_OPTIMIZATIONS)
         message(STATUS "Enabling native CPU optimizations for module compatibility")
-        set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -march=native -mavx512f -mavx512dq -mavx512bw -mavx512vl -mavx2 -mfma")
+        set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -march=native")
     endif()
 
 elseif(CMAKE_CXX_COMPILER_ID MATCHES "MSVC")
@@ -101,6 +103,114 @@ if(ENABLE_CLANG_TIDY)
     else()
         message(WARNING "clang-tidy requested but not found")
     endif()
+endif()
+
+# ============================================================================
+# Auto-Build Standard Library Module PCM (std.pcm)
+# ============================================================================
+# Build std.pcm with the SAME flags as the logger library to ensure binary
+# compatibility. This PCM can be used by any code that links against the logger.
+
+if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+    # Configurable path to libc++ std module source
+    # Try multiple common locations, can be overridden via cmake -DLIBCXX_MODULES_PATH=...
+    if(NOT LIBCXX_MODULES_PATH)
+        if(EXISTS "${LIBCXX_DEFAULT_INCLUDE}")
+            set(LIBCXX_MODULES_PATH "${LIBCXX_DEFAULT_INCLUDE}" CACHE STRING "Path to libc++ module sources")
+        elseif(EXISTS "/usr/local/share/libc++/v1")
+            set(LIBCXX_MODULES_PATH "/usr/local/share/libc++/v1" CACHE STRING "Path to libc++ module sources")
+        elseif(EXISTS "/usr/local/include/c++/v1")
+            set(LIBCXX_MODULES_PATH "/usr/local/include/c++/v1" CACHE STRING "Path to libc++ module sources")
+        else()
+            message(FATAL_ERROR "Could not find libc++ module sources. Please set LIBCXX_MODULES_PATH")
+        endif()
+    endif()
+
+    set(STD_CPPM "${LIBCXX_MODULES_PATH}/std.cppm")
+    set(STD_COMPAT_CPPM "${LIBCXX_MODULES_PATH}/std.compat.cppm")
+
+    if(NOT EXISTS "${STD_CPPM}")
+        message(FATAL_ERROR "std.cppm not found at ${STD_CPPM}. Please set LIBCXX_MODULES_PATH correctly.")
+    endif()
+
+    # Output PCM files in modules/ subdirectory
+    set(STD_PCM "${CMAKE_CURRENT_BINARY_DIR}/modules/std.pcm")
+    set(STD_COMPAT_PCM "${CMAKE_CURRENT_BINARY_DIR}/modules/std.compat.pcm")
+
+    # Create modules directory
+    file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/modules")
+
+    # Collect all compiler flags that will be used for the logger
+    set(STD_PCM_FLAGS
+        -std=c++23
+        -stdlib=libc++
+        -fPIC
+    )
+
+    # Add optimization flags if building in Release mode
+    if(CMAKE_BUILD_TYPE MATCHES "Release")
+        list(APPEND STD_PCM_FLAGS -O3)
+    endif()
+
+    # Add native optimizations if enabled (must match logger compilation)
+    # NOTE: -ffast-math is excluded to maintain binary compatibility with logger.pcm
+    # NOTE: -march=native automatically detects and uses only CPU-supported instructions
+    if(ENABLE_NATIVE_OPTIMIZATIONS)
+        list(APPEND STD_PCM_FLAGS -march=native)
+    endif()
+
+    # Add OpenMP flags if enabled (must match logger compilation)
+    if(ENABLE_OPENMP)
+        find_package(OpenMP QUIET)
+        if(OpenMP_CXX_FOUND)
+            list(APPEND STD_PCM_FLAGS -fopenmp=libomp)
+        endif()
+    endif()
+
+    # Build std.pcm
+    add_custom_command(
+        OUTPUT ${STD_PCM}
+        COMMAND ${CMAKE_CXX_COMPILER} ${STD_PCM_FLAGS}
+                --precompile ${STD_CPPM} -o ${STD_PCM}
+        DEPENDS ${STD_CPPM}
+        COMMENT "Precompiling libc++ std module for logger (std.pcm)"
+        VERBATIM
+    )
+
+    # Build std.compat.pcm (depends on std.pcm)
+    add_custom_command(
+        OUTPUT ${STD_COMPAT_PCM}
+        COMMAND ${CMAKE_CXX_COMPILER} ${STD_PCM_FLAGS}
+                -fprebuilt-module-path=${CMAKE_CURRENT_BINARY_DIR}/modules
+                --precompile ${STD_COMPAT_CPPM} -o ${STD_COMPAT_PCM}
+        DEPENDS ${STD_COMPAT_CPPM} ${STD_PCM}
+        COMMENT "Precompiling libc++ std.compat module for logger (std.compat.pcm)"
+        VERBATIM
+    )
+
+    # Custom target to build both PCM files
+    add_custom_target(build_logger_std_modules
+        DEPENDS ${STD_PCM} ${STD_COMPAT_PCM}
+        COMMENT "Building standard library modules for logger"
+    )
+
+    message(STATUS "std module PCM auto-build enabled:")
+    message(STATUS "  Module source: ${LIBCXX_MODULES_PATH}")
+    message(STATUS "  Output: ${CMAKE_CURRENT_BINARY_DIR}/modules/")
+    message(STATUS "  Compiler: ${CMAKE_CXX_COMPILER}")
+    message(STATUS "  Flags: ${STD_PCM_FLAGS}")
+    message(STATUS "  OpenMP: ${ENABLE_OPENMP}")
+    message(STATUS "  Native opts: ${ENABLE_NATIVE_OPTIMIZATIONS}")
+
+    # Export variables for external projects (parent CMakeLists.txt)
+    # These allow external code to use the same PCM with binary compatibility
+    set(LOGGER_STD_PCM "${STD_PCM}" CACHE PATH "Path to logger's precompiled std.pcm" FORCE)
+    set(LOGGER_STD_COMPAT_PCM "${STD_COMPAT_PCM}" CACHE PATH "Path to logger's precompiled std.compat.pcm" FORCE)
+    set(LOGGER_STD_PCM_FLAGS "${STD_PCM_FLAGS}" CACHE STRING "Compiler flags used for logger's std.pcm" FORCE)
+    set(LOGGER_STD_PCM_DIR "${CMAKE_CURRENT_BINARY_DIR}/modules" CACHE PATH "Directory containing logger's PCM files" FORCE)
+
+    # Mark these as advanced so they don't clutter the CMake GUI
+    mark_as_advanced(LOGGER_STD_PCM LOGGER_STD_COMPAT_PCM LOGGER_STD_PCM_FLAGS LOGGER_STD_PCM_DIR)
 endif()
 
 # ============================================================================
