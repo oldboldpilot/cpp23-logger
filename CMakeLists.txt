@@ -30,6 +30,26 @@ option(ENABLE_NATIVE_OPTIMIZATIONS "Enable native CPU optimizations (AVX-512, AV
 option(ENABLE_OPENMP "Enable OpenMP parallel processing support" OFF)
 
 # ============================================================================
+# Configurable Library Settings (for embedding in parent projects)
+# ============================================================================
+# These options allow parent projects to customize the logger library to:
+# 1. Prevent target name clashes when multiple projects use cpp23-logger
+# 2. Control static vs shared library linking
+# 3. Specify output directory for library files
+
+# Target name prefix (e.g., "sgee_" -> target becomes "sgee_logger")
+set(CPP23_LOGGER_TARGET_PREFIX "" CACHE STRING "Prefix for logger target name (e.g., 'sgee_' -> 'sgee_logger')")
+
+# Shared vs static library build
+option(CPP23_LOGGER_BUILD_SHARED "Build logger as shared library (default: follows BUILD_SHARED_LIBS)" OFF)
+
+# Custom output directory for library files
+set(CPP23_LOGGER_OUTPUT_DIR "" CACHE PATH "Custom output directory for logger library files")
+
+# Derive the actual target name
+set(CPP23_LOGGER_TARGET_NAME "${CPP23_LOGGER_TARGET_PREFIX}logger" CACHE STRING "Final logger target name" FORCE)
+
+# ============================================================================
 # C++23 Standard Requirement
 # ============================================================================
 
@@ -217,9 +237,23 @@ endif()
 # Logger Module Library
 # ============================================================================
 
-add_library(logger)
+# Determine library type based on configuration
+if(CPP23_LOGGER_BUILD_SHARED)
+    add_library(${CPP23_LOGGER_TARGET_NAME} SHARED)
+    message(STATUS "Building ${CPP23_LOGGER_TARGET_NAME} as SHARED library")
+else()
+    add_library(${CPP23_LOGGER_TARGET_NAME} STATIC)
+    message(STATUS "Building ${CPP23_LOGGER_TARGET_NAME} as STATIC library")
+endif()
 
-target_sources(logger
+# Create an alias for the original 'logger' name if using a prefix
+# This allows code to still use 'logger' target when linked
+if(CPP23_LOGGER_TARGET_PREFIX)
+    add_library(logger ALIAS ${CPP23_LOGGER_TARGET_NAME})
+    message(STATUS "Created alias: logger -> ${CPP23_LOGGER_TARGET_NAME}")
+endif()
+
+target_sources(${CPP23_LOGGER_TARGET_NAME}
     PUBLIC
         FILE_SET CXX_MODULES
         FILES
@@ -227,7 +261,7 @@ target_sources(logger
             include/logger/code_generator.cppm
 )
 
-target_include_directories(logger
+target_include_directories(${CPP23_LOGGER_TARGET_NAME}
     PUBLIC
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
         $<INSTALL_INTERFACE:include>
@@ -235,26 +269,37 @@ target_include_directories(logger
 
 # Thread support required for std::mutex
 find_package(Threads REQUIRED)
-target_link_libraries(logger PUBLIC Threads::Threads)
+target_link_libraries(${CPP23_LOGGER_TARGET_NAME} PUBLIC Threads::Threads)
 
 # Optional OpenMP support for parallel processing
 if(ENABLE_OPENMP)
     find_package(OpenMP)
     if(OpenMP_CXX_FOUND)
         message(STATUS "Enabling OpenMP support for parallel processing")
-        target_compile_options(logger PRIVATE ${OpenMP_CXX_FLAGS})
-        target_link_libraries(logger PUBLIC OpenMP::OpenMP_CXX)
+        target_compile_options(${CPP23_LOGGER_TARGET_NAME} PRIVATE ${OpenMP_CXX_FLAGS})
+        target_link_libraries(${CPP23_LOGGER_TARGET_NAME} PUBLIC OpenMP::OpenMP_CXX)
     else()
         message(WARNING "OpenMP requested but not found")
     endif()
 endif()
 
+# Determine output directory
+if(CPP23_LOGGER_OUTPUT_DIR)
+    set(_LOGGER_OUTPUT_DIR "${CPP23_LOGGER_OUTPUT_DIR}")
+else()
+    set(_LOGGER_OUTPUT_DIR "${CMAKE_BINARY_DIR}/lib")
+endif()
+
 # Set module output directory and enable position-independent code for shared library linking
-set_target_properties(logger PROPERTIES
+set_target_properties(${CPP23_LOGGER_TARGET_NAME} PROPERTIES
     POSITION_INDEPENDENT_CODE ON
-    LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
-    ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
+    LIBRARY_OUTPUT_DIRECTORY "${_LOGGER_OUTPUT_DIR}"
+    ARCHIVE_OUTPUT_DIRECTORY "${_LOGGER_OUTPUT_DIR}"
+    RUNTIME_OUTPUT_DIRECTORY "${_LOGGER_OUTPUT_DIR}"
 )
+
+# Export the target name for parent projects
+set(CPP23_LOGGER_LIBRARY_TARGET "${CPP23_LOGGER_TARGET_NAME}" CACHE STRING "Logger library target name" FORCE)
 
 # ============================================================================
 # Tests
@@ -281,7 +326,7 @@ include(GNUInstallDirs)
 include(CMakePackageConfigHelpers)
 
 # Install library and module files
-install(TARGETS logger
+install(TARGETS ${CPP23_LOGGER_TARGET_NAME}
     EXPORT loggerTargets
     FILE_SET CXX_MODULES DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/logger
     LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
@@ -326,6 +371,9 @@ install(EXPORT loggerTargets
 message(STATUS "")
 message(STATUS "cpp23-logger Configuration:")
 message(STATUS "  Version:           ${PROJECT_VERSION}")
+message(STATUS "  Target name:       ${CPP23_LOGGER_TARGET_NAME}")
+message(STATUS "  Library type:      ${CPP23_LOGGER_BUILD_SHARED}")
+message(STATUS "  Output directory:  ${_LOGGER_OUTPUT_DIR}")
 message(STATUS "  Build tests:       ${BUILD_TESTS}")
 message(STATUS "  Build examples:    ${BUILD_EXAMPLES}")
 message(STATUS "  Enable clang-tidy: ${ENABLE_CLANG_TIDY}")
