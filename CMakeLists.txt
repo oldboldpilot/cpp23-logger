@@ -271,6 +271,25 @@ target_include_directories(${CPP23_LOGGER_TARGET_NAME}
 find_package(Threads REQUIRED)
 target_link_libraries(${CPP23_LOGGER_TARGET_NAME} PUBLIC Threads::Threads)
 
+# Match parent project BMI flags for std.pcm compatibility
+if(DEFINED UNIVERSAL_MODULE_FLAGS)
+    target_compile_options(${CPP23_LOGGER_TARGET_NAME} PRIVATE ${UNIVERSAL_MODULE_FLAGS})
+    target_include_directories(${CPP23_LOGGER_TARGET_NAME} SYSTEM PRIVATE ${UNIVERSAL_MODULE_INCLUDES})
+else()
+    target_compile_options(${CPP23_LOGGER_TARGET_NAME} PRIVATE
+        -nostdinc++
+        -pthread
+        -fopenmp=libomp
+        -fstack-protector-strong
+        -fno-omit-frame-pointer
+        -msse2 -msse3 -mssse3 -msse4.1 -msse4.2 -mavx -mavx2
+    )
+    target_include_directories(${CPP23_LOGGER_TARGET_NAME} SYSTEM PRIVATE
+        /usr/local/lib/clang/21/include
+        /usr/local/include/c++/v1
+    )
+endif()
+
 # Optional OpenMP support for parallel processing
 if(ENABLE_OPENMP)
     find_package(OpenMP)
@@ -326,13 +345,14 @@ include(GNUInstallDirs)
 include(CMakePackageConfigHelpers)
 
 # Install library and module files
-install(TARGETS ${CPP23_LOGGER_TARGET_NAME}
-    EXPORT loggerTargets
-    FILE_SET CXX_MODULES DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/logger
-    LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
-    ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
-    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
-)
+# Disabled for submodule usage
+# install(TARGETS ${CPP23_LOGGER_TARGET_NAME}
+#     EXPORT loggerTargets
+#     FILE_SET CXX_MODULES DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/logger
+#     LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+#     ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
+#     RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+# )
 
 # Install headers
 install(DIRECTORY include/
@@ -352,17 +372,17 @@ write_basic_package_version_file(
     COMPATIBILITY SameMajorVersion
 )
 
-install(FILES
-    "${CMAKE_CURRENT_BINARY_DIR}/loggerConfig.cmake"
-    "${CMAKE_CURRENT_BINARY_DIR}/loggerConfigVersion.cmake"
-    DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/logger
-)
+# install(FILES
+#     "${CMAKE_CURRENT_BINARY_DIR}/loggerConfig.cmake"
+#     "${CMAKE_CURRENT_BINARY_DIR}/loggerConfigVersion.cmake"
+#     DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/logger
+# )
 
-install(EXPORT loggerTargets
-    FILE loggerTargets.cmake
-    NAMESPACE logger::
-    DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/logger
-)
+# install(EXPORT loggerTargets
+#     FILE loggerTargets.cmake
+#     NAMESPACE logger::
+#     DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/logger
+# )
 
 # ============================================================================
 # Package Information
