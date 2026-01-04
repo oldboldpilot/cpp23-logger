@@ -358,11 +358,11 @@ install(FILES
     DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/logger
 )
 
-install(EXPORT loggerTargets
-    FILE loggerTargets.cmake
-    NAMESPACE logger::
-    DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/logger
-)
+# install(EXPORT loggerTargets
+#     FILE loggerTargets.cmake
+#     NAMESPACE logger::
+#     DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/logger
+# )
 
 # ============================================================================
 # Package Information
