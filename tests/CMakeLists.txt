@@ -1,11 +1,19 @@
+# NOTE: these tests express their checks with assert(). assert() expands to a
+# no-op when NDEBUG is defined, which CMake adds for Release/MinSizeRel/
+# RelWithDebInfo builds — that would make the whole suite vacuous (it would only
+# catch crashes, not failed checks). Force assertions live regardless of build
+# type by undefining NDEBUG for every test target.
 add_executable(test_logger test_logger.cpp)
 target_link_libraries(test_logger PRIVATE logger)
+target_compile_options(test_logger PRIVATE -UNDEBUG)
 
 add_executable(test_nested_templates test_nested_templates.cpp)
 target_link_libraries(test_nested_templates PRIVATE logger)
+target_compile_options(test_nested_templates PRIVATE -UNDEBUG)
 
 add_executable(test_functional_templates test_functional_templates.cpp)
 target_link_libraries(test_functional_templates PRIVATE logger)
+target_compile_options(test_functional_templates PRIVATE -UNDEBUG)
 
 # Test std module binary compatibility with logger
 if(CMAKE_CXX_COMPILER_ID MATCHES "Clang" AND TARGET build_logger_std_modules)
@@ -19,6 +27,7 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "Clang" AND TARGET build_logger_std_modules)
     target_compile_options(test_std_module PRIVATE
         ${LOGGER_STD_PCM_FLAGS}
         -fprebuilt-module-path=${LOGGER_STD_PCM_DIR}
+        -UNDEBUG
     )
 
     # Link with libc++ explicitly for std module support

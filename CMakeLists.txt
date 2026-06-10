@@ -38,6 +38,7 @@ project(cpp23-logger
 
 option(BUILD_TESTS "Build test suite" ON)
 option(BUILD_EXAMPLES "Build example programs" ON)
+option(BUILD_BENCHMARKS "Build micro-benchmarks (perf harness)" OFF)
 option(ENABLE_CLANG_TIDY "Enable clang-tidy checks" OFF)
 option(ENABLE_NATIVE_OPTIMIZATIONS "Enable native CPU optimizations (AVX-512, AVX2, etc) to match parent project" OFF)
 option(ENABLE_OPENMP "Enable OpenMP parallel processing support" OFF)
@@ -110,11 +111,16 @@ elseif(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
         set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++23 -stdlib=libc++")
     endif()
 
-    # Optional: Add native CPU optimizations if requested by parent project
-    # NOTE: -march=native automatically detects and uses only CPU-supported instructions
+    # Optional: Add portable CPU optimizations if requested by parent project.
+    # We deliberately do NOT use -march=native: it bakes in host-specific ISA
+    # extensions, which breaks BMI/binary portability and cross-host
+    # floating-point parity (the parent project's policy bans it for exactly this
+    # reason). -march=x86-64-v3 is a stable baseline (AVX2+FMA+BMI) that matches
+    # the parent's canonical flags; per-function [[gnu::target(...)]] is the way
+    # to opt into AVX-512, not a global -m flag.
     if(ENABLE_NATIVE_OPTIMIZATIONS)
-        message(STATUS "Enabling native CPU optimizations for module compatibility")
-        set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -march=native")
+        message(STATUS "Enabling portable CPU optimizations (x86-64-v3) for module compatibility")
+        set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -march=x86-64-v3 -mtune=generic -mavx -mavx2 -mfma")
     endif()
 
 elseif(CMAKE_CXX_COMPILER_ID MATCHES "GNU")
@@ -124,11 +130,16 @@ elseif(CMAKE_CXX_COMPILER_ID MATCHES "GNU")
     # GCC C++23 modules flags
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++23 -fmodules-ts")
 
-    # Optional: Add native CPU optimizations if requested by parent project
-    # NOTE: -march=native automatically detects and uses only CPU-supported instructions
+    # Optional: Add portable CPU optimizations if requested by parent project.
+    # We deliberately do NOT use -march=native: it bakes in host-specific ISA
+    # extensions, which breaks BMI/binary portability and cross-host
+    # floating-point parity (the parent project's policy bans it for exactly this
+    # reason). -march=x86-64-v3 is a stable baseline (AVX2+FMA+BMI) that matches
+    # the parent's canonical flags; per-function [[gnu::target(...)]] is the way
+    # to opt into AVX-512, not a global -m flag.
     if(ENABLE_NATIVE_OPTIMIZATIONS)
-        message(STATUS "Enabling native CPU optimizations for module compatibility")
-        set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -march=native")
+        message(STATUS "Enabling portable CPU optimizations (x86-64-v3) for module compatibility")
+        set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -march=x86-64-v3 -mtune=generic -mavx -mavx2 -mfma")
     endif()
 
 elseif(CMAKE_CXX_COMPILER_ID MATCHES "MSVC")
@@ -241,14 +252,25 @@ elseif(NOT CMAKE_CXX_MODULE_STD AND CMAKE_CXX_COMPILER_ID MATCHES "Clang"
     # Configurable path to libc++ std module source
     # Try multiple common locations, can be overridden via cmake -DLIBCXX_MODULES_PATH=...
     if(NOT LIBCXX_MODULES_PATH)
-        if(EXISTS "${LIBCXX_DEFAULT_INCLUDE}")
+        # Prefer the libc++ that ships with the active compiler: its std.cppm
+        # lives at <clang-prefix>/share/libc++/v1, where <clang-prefix> is two
+        # directories up from the compiler binary (…/bin/clang++). This is what
+        # makes the build work out-of-the-box for non-system toolchains
+        # (Homebrew/Linuxbrew, custom LLVM installs) instead of only /usr/local.
+        get_filename_component(_cxx_bindir "${CMAKE_CXX_COMPILER}" DIRECTORY)
+        get_filename_component(_cxx_prefix "${_cxx_bindir}" DIRECTORY)
+        set(_libcxx_from_compiler "${_cxx_prefix}/share/libc++/v1")
+        if(EXISTS "${_libcxx_from_compiler}/std.cppm")
+            set(LIBCXX_MODULES_PATH "${_libcxx_from_compiler}" CACHE STRING "Path to libc++ module sources")
+        elseif(EXISTS "${LIBCXX_DEFAULT_INCLUDE}/std.cppm")
             set(LIBCXX_MODULES_PATH "${LIBCXX_DEFAULT_INCLUDE}" CACHE STRING "Path to libc++ module sources")
-        elseif(EXISTS "/usr/local/share/libc++/v1")
+        elseif(EXISTS "/usr/local/share/libc++/v1/std.cppm")
             set(LIBCXX_MODULES_PATH "/usr/local/share/libc++/v1" CACHE STRING "Path to libc++ module sources")
-        elseif(EXISTS "/usr/local/include/c++/v1")
+        elseif(EXISTS "/usr/local/include/c++/v1/std.cppm")
             set(LIBCXX_MODULES_PATH "/usr/local/include/c++/v1" CACHE STRING "Path to libc++ module sources")
         else()
-            message(FATAL_ERROR "Could not find libc++ module sources. Please set LIBCXX_MODULES_PATH")
+            message(FATAL_ERROR "Could not find libc++ module sources (looked for std.cppm under "
+                "'${_libcxx_from_compiler}' and /usr/local). Please set -DLIBCXX_MODULES_PATH=<dir containing std.cppm>.")
         endif()
     endif()
 
@@ -278,11 +300,13 @@ elseif(NOT CMAKE_CXX_MODULE_STD AND CMAKE_CXX_COMPILER_ID MATCHES "Clang"
         list(APPEND STD_PCM_FLAGS -O3)
     endif()
 
-    # Add native optimizations if enabled (must match logger compilation)
-    # NOTE: -ffast-math is excluded to maintain binary compatibility with logger.pcm
-    # NOTE: -march=native automatically detects and uses only CPU-supported instructions
+    # Add portable optimizations if enabled (must match logger compilation).
+    # -ffast-math is excluded to maintain binary compatibility with logger.pcm,
+    # and -march=native is excluded for cross-host portability / FP parity (see
+    # the per-toolchain blocks above) — std.pcm must stay ABI-compatible with the
+    # logger BMI across machines, so we use the same x86-64-v3 baseline.
     if(ENABLE_NATIVE_OPTIMIZATIONS)
-        list(APPEND STD_PCM_FLAGS -march=native)
+        list(APPEND STD_PCM_FLAGS -march=x86-64-v3 -mtune=generic -mavx -mavx2 -mfma)
     endif()
 
     # Add OpenMP flags if enabled (must match logger compilation)
@@ -429,6 +453,10 @@ endif()
 
 if(BUILD_EXAMPLES)
     add_subdirectory(examples)
+endif()
+
+if(BUILD_BENCHMARKS)
+    add_subdirectory(benchmarks)
 endif()
 
 # ============================================================================
