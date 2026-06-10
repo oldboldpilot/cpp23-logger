@@ -13,6 +13,26 @@ set(CLANG_DEFAULT_PATH "/usr/local/bin" CACHE STRING "Default path for Clang bin
 set(LIBCXX_DEFAULT_INCLUDE "/usr/local/include/c++/v1" CACHE STRING "Default path for libc++ headers")
 set(LIBCXX_DEFAULT_LIB "/usr/local/lib" CACHE STRING "Default path for libc++ libraries")
 
+# ============================================================================
+# C++23 `import std` support — MUST be enabled before project()/enable_language.
+# Mirrors sensen's proven Windows setup. On Windows (clang-cl/MSVC) we let CMake
+# build the std module NATIVELY — this also wires up clang-cl's module
+# dependency scanner (clang-scan-deps), which CMake otherwise won't enable for
+# clang-cl ("compiler does not provide a way to discover the import graph").
+# On Linux we keep managing libc++ std.pcm ourselves (below). The experimental
+# feature UUID changed in CMake 4.0.
+# ============================================================================
+if(CMAKE_VERSION VERSION_LESS "4.0.0")
+    set(CMAKE_EXPERIMENTAL_CXX_IMPORT_STD "d0edc3af-4c50-42ea-a356-e2862fe7a444")
+else()
+    set(CMAKE_EXPERIMENTAL_CXX_IMPORT_STD "451f2fe2-a8a2-47c3-bc32-94786d8fc91b")
+endif()
+if(WIN32)
+    set(CMAKE_CXX_MODULE_STD ON)
+else()
+    set(CMAKE_CXX_MODULE_STD OFF)  # Linux: we precompile libc++ std.pcm ourselves
+endif()
+
 project(cpp23-logger
     VERSION 1.0.0
     DESCRIPTION "Production-grade C++23 logger with Mustache templates and fluent API"
@@ -62,7 +82,15 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 # ============================================================================
 
 # Check for C++23 modules support
-if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+if(CMAKE_CXX_COMPILER_ID MATCHES "Clang" AND CMAKE_CXX_COMPILER_FRONTEND_VARIANT STREQUAL "MSVC")
+    # clang-cl on Windows: uses the MSVC STL (and the MSVC std module, std.ixx),
+    # NOT libc++. Must use the cl-style driver flags; -stdlib=libc++ is invalid.
+    if(CMAKE_CXX_COMPILER_VERSION VERSION_LESS "17.0")
+        message(FATAL_ERROR "clang-cl 17.0 or higher required for C++23 modules support")
+    endif()
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /std:c++latest /EHsc")
+
+elseif(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
     if(CMAKE_CXX_COMPILER_VERSION VERSION_LESS "17.0")
         message(FATAL_ERROR "Clang 17.0 or higher required for C++23 modules support")
     endif()
@@ -131,7 +159,64 @@ endif()
 # Build std.pcm with the SAME flags as the logger library to ensure binary
 # compatibility. This PCM can be used by any code that links against the logger.
 
-if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+if(NOT CMAKE_CXX_MODULE_STD AND CMAKE_CXX_COMPILER_ID MATCHES "Clang" AND CMAKE_CXX_COMPILER_FRONTEND_VARIANT STREQUAL "MSVC")
+    # ---- clang-cl on Windows: precompile the MSVC std module (std.ixx) ----
+    # (Only reached when native CMAKE_CXX_MODULE_STD is explicitly disabled; the
+    #  default Windows path above lets CMake build/scan the std module.)
+    # clang-cl uses the MSVC STL, so the module source is MSVC's std.ixx /
+    # std.compat.ixx (shipped under <VCToolsInstallDir>/modules), not libc++.
+    if(NOT MSVC_MODULES_PATH)
+        if(DEFINED ENV{VCToolsInstallDir} AND EXISTS "$ENV{VCToolsInstallDir}/modules/std.ixx")
+            cmake_path(SET MSVC_MODULES_PATH NORMALIZE "$ENV{VCToolsInstallDir}/modules")
+        else()
+            message(FATAL_ERROR "clang-cl: could not find the MSVC std module (std.ixx). "
+                                "Build from a Visual Studio dev shell (vcvars sets VCToolsInstallDir), "
+                                "or pass -DMSVC_MODULES_PATH=<...\\VC\\Tools\\MSVC\\<ver>\\modules>.")
+        endif()
+    endif()
+
+    set(STD_IXX "${MSVC_MODULES_PATH}/std.ixx")
+    set(STD_COMPAT_IXX "${MSVC_MODULES_PATH}/std.compat.ixx")
+    if(NOT EXISTS "${STD_IXX}")
+        message(FATAL_ERROR "std.ixx not found at ${STD_IXX}. Set MSVC_MODULES_PATH correctly.")
+    endif()
+
+    set(STD_PCM "${CMAKE_CURRENT_BINARY_DIR}/modules/std.pcm")
+    set(STD_COMPAT_PCM "${CMAKE_CURRENT_BINARY_DIR}/modules/std.compat.pcm")
+    file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/modules")
+
+    set(STD_PCM_FLAGS /std:c++latest /EHsc)
+    if(CMAKE_BUILD_TYPE MATCHES "Release")
+        list(APPEND STD_PCM_FLAGS /O2)
+    endif()
+
+    add_custom_command(
+        OUTPUT ${STD_PCM}
+        COMMAND ${CMAKE_CXX_COMPILER} ${STD_PCM_FLAGS} --precompile ${STD_IXX} -o ${STD_PCM}
+        DEPENDS ${STD_IXX}
+        COMMENT "Precompiling MSVC std module for logger (std.pcm, clang-cl)"
+        VERBATIM
+    )
+    add_custom_command(
+        OUTPUT ${STD_COMPAT_PCM}
+        COMMAND ${CMAKE_CXX_COMPILER} ${STD_PCM_FLAGS}
+                -fprebuilt-module-path=${CMAKE_CURRENT_BINARY_DIR}/modules
+                --precompile ${STD_COMPAT_IXX} -o ${STD_COMPAT_PCM}
+        DEPENDS ${STD_COMPAT_IXX} ${STD_PCM}
+        COMMENT "Precompiling MSVC std.compat module for logger (clang-cl)"
+        VERBATIM
+    )
+    add_custom_target(build_logger_std_modules DEPENDS ${STD_PCM} ${STD_COMPAT_PCM})
+
+    message(STATUS "std module PCM auto-build enabled (clang-cl / MSVC std.ixx):")
+    message(STATUS "  Module source: ${MSVC_MODULES_PATH}")
+    set(LOGGER_STD_PCM "${STD_PCM}" CACHE PATH "Path to logger's precompiled std.pcm" FORCE)
+    set(LOGGER_STD_COMPAT_PCM "${STD_COMPAT_PCM}" CACHE PATH "Path to logger's precompiled std.compat.pcm" FORCE)
+    set(LOGGER_STD_PCM_FLAGS "${STD_PCM_FLAGS}" CACHE STRING "Compiler flags used for logger's std.pcm" FORCE)
+    set(LOGGER_STD_PCM_DIR "${CMAKE_CURRENT_BINARY_DIR}/modules" CACHE PATH "Directory containing logger's PCM files" FORCE)
+    mark_as_advanced(LOGGER_STD_PCM LOGGER_STD_COMPAT_PCM LOGGER_STD_PCM_FLAGS LOGGER_STD_PCM_DIR)
+
+elseif(NOT CMAKE_CXX_MODULE_STD AND CMAKE_CXX_COMPILER_ID MATCHES "Clang")
     # Configurable path to libc++ std module source
     # Try multiple common locations, can be overridden via cmake -DLIBCXX_MODULES_PATH=...
     if(NOT LIBCXX_MODULES_PATH)
@@ -260,6 +345,13 @@ target_sources(${CPP23_LOGGER_TARGET_NAME}
             include/logger/logger.cppm
             include/logger/code_generator.cppm
 )
+
+# Enable C++23 module dependency scanning on THIS target only. clang-cl on
+# Windows does not auto-enable scanning (unlike clang-on-Linux), so CMake errors
+# that the target "has C++ sources that may use modules". Scoping it to the
+# target (rather than the global CMAKE_CXX_SCAN_FOR_MODULES) avoids forcing
+# scanning into CMake's feature-check try_compile projects, which breaks them.
+set_target_properties(${CPP23_LOGGER_TARGET_NAME} PROPERTIES CXX_SCAN_FOR_MODULES ON)
 
 target_include_directories(${CPP23_LOGGER_TARGET_NAME}
     PUBLIC
