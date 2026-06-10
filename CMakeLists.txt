@@ -14,24 +14,17 @@ set(LIBCXX_DEFAULT_INCLUDE "/usr/local/include/c++/v1" CACHE STRING "Default pat
 set(LIBCXX_DEFAULT_LIB "/usr/local/lib" CACHE STRING "Default path for libc++ libraries")
 
 # ============================================================================
-# C++23 `import std` support — MUST be enabled before project()/enable_language.
-# Mirrors sensen's proven Windows setup. On Windows (clang-cl/MSVC) we let CMake
-# build the std module NATIVELY — this also wires up clang-cl's module
-# dependency scanner (clang-scan-deps), which CMake otherwise won't enable for
-# clang-cl ("compiler does not provide a way to discover the import graph").
-# On Linux we keep managing libc++ std.pcm ourselves (below). The experimental
-# feature UUID changed in CMake 4.0.
+# `import std` is NOT used by the logger's modules — their global module
+# fragments textually #include the std headers, so no std module is ever
+# required to build this library. CMAKE_CXX_MODULE_STD is forced OFF so an
+# embedding parent that enables the experimental `import std` support globally
+# does not drag a std-module build into the logger's targets.
+#
+# NOTE: enabling CMAKE_CXX_MODULE_STD does NOT provide a module dependency
+# scanner for clang-cl — CMake has no scanning rule at all for Clang with the
+# MSVC frontend (see the toolchain gate below).
 # ============================================================================
-if(CMAKE_VERSION VERSION_LESS "4.0.0")
-    set(CMAKE_EXPERIMENTAL_CXX_IMPORT_STD "d0edc3af-4c50-42ea-a356-e2862fe7a444")
-else()
-    set(CMAKE_EXPERIMENTAL_CXX_IMPORT_STD "451f2fe2-a8a2-47c3-bc32-94786d8fc91b")
-endif()
-if(WIN32)
-    set(CMAKE_CXX_MODULE_STD ON)
-else()
-    set(CMAKE_CXX_MODULE_STD OFF)  # Linux: we precompile libc++ std.pcm ourselves
-endif()
+set(CMAKE_CXX_MODULE_STD OFF)
 
 project(cpp23-logger
     VERSION 1.0.0
@@ -90,12 +83,32 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "Clang" AND CMAKE_CXX_COMPILER_FRONTEND_VARIANT
     endif()
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /std:c++latest /EHsc")
 
+    # CMake ships no module-dependency scanner rule for Clang with the MSVC
+    # frontend: the clang-scan-deps (p1689) rule is wired only for the GNU
+    # driver, and clang-cl ignores MSVC's -scanDependencies flag. Without a
+    # scanner rule, generation fails with "the compiler does not provide a way
+    # to discover the import graph dependencies". Fail fast at configure time
+    # with actionable guidance; the gate opens automatically if a future CMake
+    # adds clang-cl scanning support.
+    if(NOT CMAKE_CXX_SCANDEP_SOURCE)
+        message(FATAL_ERROR
+            "clang-cl cannot build C++23 named modules with this CMake "
+            "(no module dependency scanner rule exists for the MSVC frontend). "
+            "Configure with clang++.exe (GNU driver; targets the MSVC ABI/STL "
+            "by default on Windows) or native MSVC cl.exe (VS 17.4+) instead.")
+    endif()
+
 elseif(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
     if(CMAKE_CXX_COMPILER_VERSION VERSION_LESS "17.0")
         message(FATAL_ERROR "Clang 17.0 or higher required for C++23 modules support")
     endif()
-    # Clang C++23 modules flags
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++23 -stdlib=libc++")
+    # Clang C++23 modules flags. On Windows, clang++ (GNU driver) targets the
+    # MSVC ABI and uses the MSVC STL by default — -stdlib=libc++ does not apply.
+    if(WIN32)
+        set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++23")
+    else()
+        set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++23 -stdlib=libc++")
+    endif()
 
     # Optional: Add native CPU optimizations if requested by parent project
     # NOTE: -march=native automatically detects and uses only CPU-supported instructions
@@ -122,8 +135,10 @@ elseif(CMAKE_CXX_COMPILER_ID MATCHES "MSVC")
     if(CMAKE_CXX_COMPILER_VERSION VERSION_LESS "19.34")
         message(FATAL_ERROR "MSVC 19.34 (VS 2022 17.4) or higher required for C++23 modules")
     endif()
-    # MSVC C++23 modules flags
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /std:c++latest /experimental:module")
+    # Standard C++23 named modules: cl.exe >= 19.34 scans via -scanDependencies
+    # (wired by CMake's MSVC rules). The retired /experimental:module flag must
+    # NOT be passed. /EHsc matches the exception model the MSVC STL expects.
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /std:c++latest /EHsc")
 
 else()
     message(FATAL_ERROR "Unsupported compiler. Requires Clang 17+, GCC 14+, or MSVC 19.34+")
@@ -161,8 +176,9 @@ endif()
 
 if(NOT CMAKE_CXX_MODULE_STD AND CMAKE_CXX_COMPILER_ID MATCHES "Clang" AND CMAKE_CXX_COMPILER_FRONTEND_VARIANT STREQUAL "MSVC")
     # ---- clang-cl on Windows: precompile the MSVC std module (std.ixx) ----
-    # (Only reached when native CMAKE_CXX_MODULE_STD is explicitly disabled; the
-    #  default Windows path above lets CMake build/scan the std module.)
+    # (Currently unreachable: the clang-cl scanner gate above fails the
+    #  configure first. Kept for the day a CMake release adds clang-cl module
+    #  scanning, at which point this provides the std PCM service for parents.)
     # clang-cl uses the MSVC STL, so the module source is MSVC's std.ixx /
     # std.compat.ixx (shipped under <VCToolsInstallDir>/modules), not libc++.
     if(NOT MSVC_MODULES_PATH)
@@ -216,7 +232,12 @@ if(NOT CMAKE_CXX_MODULE_STD AND CMAKE_CXX_COMPILER_ID MATCHES "Clang" AND CMAKE_
     set(LOGGER_STD_PCM_DIR "${CMAKE_CURRENT_BINARY_DIR}/modules" CACHE PATH "Directory containing logger's PCM files" FORCE)
     mark_as_advanced(LOGGER_STD_PCM LOGGER_STD_COMPAT_PCM LOGGER_STD_PCM_FLAGS LOGGER_STD_PCM_DIR)
 
-elseif(NOT CMAKE_CXX_MODULE_STD AND CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+elseif(NOT CMAKE_CXX_MODULE_STD AND CMAKE_CXX_COMPILER_ID MATCHES "Clang"
+       AND (NOT WIN32 OR LIBCXX_MODULES_PATH))
+    # libc++ std.pcm precompile (a service exported to parent projects via
+    # LOGGER_STD_PCM — the logger itself never imports std). On Windows, clang++
+    # uses the MSVC STL and libc++ is normally absent, so this branch is skipped
+    # unless LIBCXX_MODULES_PATH is passed explicitly.
     # Configurable path to libc++ std module source
     # Try multiple common locations, can be overridden via cmake -DLIBCXX_MODULES_PATH=...
     if(NOT LIBCXX_MODULES_PATH)
