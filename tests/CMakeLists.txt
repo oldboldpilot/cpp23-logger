@@ -23,7 +23,23 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "Clang" AND TARGET build_logger_std_modules)
     # Ensure PCM files are built first
     add_dependencies(test_std_module build_logger_std_modules)
 
-    # CRITICAL: Must use the EXACT same flags as std.pcm was built with
+    # CRITICAL: Must use the EXACT same flags as std.pcm was built with.
+    #
+    # test_std_module.cpp does `import std;` directly in its own source, and
+    # this target has no CXX_SCAN_FOR_MODULES / FILE_SET CXX_MODULES of its
+    # own (only the `logger` library target does, which is why `import
+    # logger;` in the same file needs no equivalent flag here — CMake
+    # propagates that BMI location automatically via target_link_libraries).
+    # CMAKE_CXX_MODULE_STD is forced OFF project-wide (see the top of
+    # CMakeLists.txt), so there is no CMake-managed std-module target to link
+    # against either. std.pcm here is a hand-built BMI produced by a raw
+    # add_custom_command (see LOGGER_STD_PCM's own definition), invisible to
+    # CMake's module dependency graph — the only way for this TU to resolve
+    # `import std;` against it is to tell the compiler explicitly where to
+    # look. LOGGER_STD_PCM_DIR is exported by the top-level CMakeLists.txt as
+    # the single source of truth for that directory (derived from STD_PCM's
+    # own path, not a separately-hardcoded literal) — this is the correct
+    # consumer-side site for that dependency, not a stray leftover.
     target_compile_options(test_std_module PRIVATE
         ${LOGGER_STD_PCM_FLAGS}
         -fprebuilt-module-path=${LOGGER_STD_PCM_DIR}
