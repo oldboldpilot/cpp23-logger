@@ -211,6 +211,11 @@ if(NOT CMAKE_CXX_MODULE_STD AND CMAKE_CXX_COMPILER_ID MATCHES "Clang" AND CMAKE_
     set(STD_PCM "${CMAKE_CURRENT_BINARY_DIR}/modules/std.pcm")
     set(STD_COMPAT_PCM "${CMAKE_CURRENT_BINARY_DIR}/modules/std.compat.pcm")
     file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/modules")
+    # Single source of truth for where std.pcm lives, so the compat build
+    # below (and the LOGGER_STD_PCM_DIR service exported further down) can
+    # never drift from STD_PCM's own path. See the comment on the compat
+    # add_custom_command for why this directory must be passed explicitly.
+    get_filename_component(STD_PCM_MODULES_DIR "${STD_PCM}" DIRECTORY)
 
     set(STD_PCM_FLAGS /std:c++latest /EHsc)
     if(CMAKE_BUILD_TYPE MATCHES "Release")
@@ -224,9 +229,21 @@ if(NOT CMAKE_CXX_MODULE_STD AND CMAKE_CXX_COMPILER_ID MATCHES "Clang" AND CMAKE_
         COMMENT "Precompiling MSVC std module for logger (std.pcm, clang-cl)"
         VERBATIM
     )
+    # std.compat.ixx's generated source is `export module std.compat; export
+    # import std;` (MSVC's std module set mirrors libc++'s here) — it
+    # genuinely imports std, so the compiler needs to find std.pcm's BMI to
+    # precompile it. This is a raw add_custom_command, not a FILE_SET
+    # CXX_MODULES target, so there is no CMake module-dependency scanner
+    # watching it and no `target_link_libraries(... std_module)` (or
+    # equivalent target-level dependency) available to establish this
+    # automatically — an explicit -fprebuilt-module-path is the only way to
+    # tell the compiler where the just-built std.pcm lives. Derived from
+    # STD_PCM_MODULES_DIR (STD_PCM's own directory) rather than a second
+    # hardcoded literal, so the two can never disagree.
     add_custom_command(
         OUTPUT ${STD_COMPAT_PCM}
         COMMAND ${CMAKE_CXX_COMPILER} ${STD_PCM_FLAGS}
+                -fprebuilt-module-path=${STD_PCM_MODULES_DIR}
                 --precompile ${STD_COMPAT_IXX} -o ${STD_COMPAT_PCM}
         DEPENDS ${STD_COMPAT_IXX} ${STD_PCM}
         COMMENT "Precompiling MSVC std.compat module for logger (clang-cl)"
@@ -239,7 +256,7 @@ if(NOT CMAKE_CXX_MODULE_STD AND CMAKE_CXX_COMPILER_ID MATCHES "Clang" AND CMAKE_
     set(LOGGER_STD_PCM "${STD_PCM}" CACHE PATH "Path to logger's precompiled std.pcm" FORCE)
     set(LOGGER_STD_COMPAT_PCM "${STD_COMPAT_PCM}" CACHE PATH "Path to logger's precompiled std.compat.pcm" FORCE)
     set(LOGGER_STD_PCM_FLAGS "${STD_PCM_FLAGS}" CACHE STRING "Compiler flags used for logger's std.pcm" FORCE)
-    set(LOGGER_STD_PCM_DIR "${CMAKE_CURRENT_BINARY_DIR}/modules" CACHE PATH "Directory containing logger's PCM files" FORCE)
+    set(LOGGER_STD_PCM_DIR "${STD_PCM_MODULES_DIR}" CACHE PATH "Directory containing logger's PCM files" FORCE)
     mark_as_advanced(LOGGER_STD_PCM LOGGER_STD_COMPAT_PCM LOGGER_STD_PCM_FLAGS LOGGER_STD_PCM_DIR)
 
 elseif(NOT CMAKE_CXX_MODULE_STD AND CMAKE_CXX_COMPILER_ID MATCHES "Clang"
@@ -286,6 +303,11 @@ elseif(NOT CMAKE_CXX_MODULE_STD AND CMAKE_CXX_COMPILER_ID MATCHES "Clang"
 
     # Create modules directory
     file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/modules")
+    # Single source of truth for where std.pcm lives, so the compat build
+    # below (and the LOGGER_STD_PCM_DIR service exported further down) can
+    # never drift from STD_PCM's own path. See the comment on the compat
+    # add_custom_command for why this directory must be passed explicitly.
+    get_filename_component(STD_PCM_MODULES_DIR "${STD_PCM}" DIRECTORY)
 
     # Collect all compiler flags that will be used for the logger
     set(STD_PCM_FLAGS
@@ -326,10 +348,25 @@ elseif(NOT CMAKE_CXX_MODULE_STD AND CMAKE_CXX_COMPILER_ID MATCHES "Clang"
         VERBATIM
     )
 
-    # Build std.compat.pcm (depends on std.pcm)
+    # Build std.compat.pcm (depends on std.pcm). std.compat.cppm is generated
+    # by LLVM as `export module std.compat; export import std;` — it
+    # genuinely imports std, so the compiler needs to find std.pcm's BMI to
+    # precompile it. This is a raw add_custom_command, not a FILE_SET
+    # CXX_MODULES target, so there is no CMake module-dependency scanner
+    # watching it and no `target_link_libraries(... std_module)` (or
+    # equivalent target-level dependency) available to establish this
+    # automatically — an explicit -fprebuilt-module-path is the only way to
+    # tell the compiler where the just-built std.pcm lives. Confirmed by
+    # direct repro: removing this flag makes std.compat.pcm's `import std;`
+    # fail with "module 'std' not found", even though std.pcm was already
+    # built by the preceding add_custom_command in this same graph — DEPENDS
+    # only orders the build, it does not put std.pcm on the module search
+    # path. Derived from STD_PCM_MODULES_DIR (STD_PCM's own directory) rather
+    # than a second hardcoded literal, so the two can never disagree.
     add_custom_command(
         OUTPUT ${STD_COMPAT_PCM}
         COMMAND ${CMAKE_CXX_COMPILER} ${STD_PCM_FLAGS}
+                -fprebuilt-module-path=${STD_PCM_MODULES_DIR}
                 --precompile ${STD_COMPAT_CPPM} -o ${STD_COMPAT_PCM}
         DEPENDS ${STD_COMPAT_CPPM} ${STD_PCM}
         COMMENT "Precompiling libc++ std.compat module for logger (std.compat.pcm)"
@@ -355,7 +392,7 @@ elseif(NOT CMAKE_CXX_MODULE_STD AND CMAKE_CXX_COMPILER_ID MATCHES "Clang"
     set(LOGGER_STD_PCM "${STD_PCM}" CACHE PATH "Path to logger's precompiled std.pcm" FORCE)
     set(LOGGER_STD_COMPAT_PCM "${STD_COMPAT_PCM}" CACHE PATH "Path to logger's precompiled std.compat.pcm" FORCE)
     set(LOGGER_STD_PCM_FLAGS "${STD_PCM_FLAGS}" CACHE STRING "Compiler flags used for logger's std.pcm" FORCE)
-    set(LOGGER_STD_PCM_DIR "${CMAKE_CURRENT_BINARY_DIR}/modules" CACHE PATH "Directory containing logger's PCM files" FORCE)
+    set(LOGGER_STD_PCM_DIR "${STD_PCM_MODULES_DIR}" CACHE PATH "Directory containing logger's PCM files" FORCE)
 
     # Mark these as advanced so they don't clutter the CMake GUI
     mark_as_advanced(LOGGER_STD_PCM LOGGER_STD_COMPAT_PCM LOGGER_STD_PCM_FLAGS LOGGER_STD_PCM_DIR)
