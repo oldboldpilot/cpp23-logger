@@ -227,7 +227,6 @@ if(NOT CMAKE_CXX_MODULE_STD AND CMAKE_CXX_COMPILER_ID MATCHES "Clang" AND CMAKE_
     add_custom_command(
         OUTPUT ${STD_COMPAT_PCM}
         COMMAND ${CMAKE_CXX_COMPILER} ${STD_PCM_FLAGS}
-                -fprebuilt-module-path=${CMAKE_CURRENT_BINARY_DIR}/modules
                 --precompile ${STD_COMPAT_IXX} -o ${STD_COMPAT_PCM}
         DEPENDS ${STD_COMPAT_IXX} ${STD_PCM}
         COMMENT "Precompiling MSVC std.compat module for logger (clang-cl)"
@@ -331,7 +330,6 @@ elseif(NOT CMAKE_CXX_MODULE_STD AND CMAKE_CXX_COMPILER_ID MATCHES "Clang"
     add_custom_command(
         OUTPUT ${STD_COMPAT_PCM}
         COMMAND ${CMAKE_CXX_COMPILER} ${STD_PCM_FLAGS}
-                -fprebuilt-module-path=${CMAKE_CURRENT_BINARY_DIR}/modules
                 --precompile ${STD_COMPAT_CPPM} -o ${STD_COMPAT_PCM}
         DEPENDS ${STD_COMPAT_CPPM} ${STD_PCM}
         COMMENT "Precompiling libc++ std.compat module for logger (std.compat.pcm)"
