@@ -259,6 +259,48 @@ if(NOT CMAKE_CXX_MODULE_STD AND CMAKE_CXX_COMPILER_ID MATCHES "Clang" AND CMAKE_
     set(LOGGER_STD_PCM_DIR "${STD_PCM_MODULES_DIR}" CACHE PATH "Directory containing logger's PCM files" FORCE)
     mark_as_advanced(LOGGER_STD_PCM LOGGER_STD_COMPAT_PCM LOGGER_STD_PCM_FLAGS LOGGER_STD_PCM_DIR)
 
+elseif(EXTERNAL_STD_PCM OR BIGBROTHER_STD_PCM)
+    # A superproject has already precompiled THE std.pcm for this build tree and handed us
+    # the path. Re-export it under the LOGGER_STD_PCM names -- which is the entire point of
+    # the branch below, since the logger itself never imports std -- and add no second
+    # --precompile rule.
+    #
+    # The rule below is otherwise unconditional and built std.pcm from a much smaller flag
+    # set (-std=c++23 -stdlib=libc++ -fPIC -O3: no -nostdinc++, no vendored -isystem, no
+    # -fexperimental-library, no ISA flags), producing a BMI that no consumer in such a
+    # parent can load. Nothing consumed it, so it only ever cost build time -- but two
+    # std.pcm rules in one tree is the defect that put two `std` modules into a single
+    # translation unit and crashed clang's BMI reader in
+    # ASTDeclReader::attachPreviousDeclImpl<FunctionDecl>. It does not get to stay.
+    #
+    # EXTERNAL_STD_PCM is the general contract; BIGBROTHER_STD_PCM is accepted because
+    # BigBrotherAnalytics already exports that name.
+    if(EXTERNAL_STD_PCM)
+        set(STD_PCM "${EXTERNAL_STD_PCM}")
+    else()
+        set(STD_PCM "${BIGBROTHER_STD_PCM}")
+    endif()
+    get_filename_component(STD_PCM_MODULES_DIR "${STD_PCM}" DIRECTORY)
+    set(LOGGER_STD_PCM "${STD_PCM}" CACHE PATH "Path to logger's precompiled std.pcm" FORCE)
+    set(LOGGER_STD_PCM_DIR "${STD_PCM_MODULES_DIR}" CACHE PATH "Directory containing logger's PCM files" FORCE)
+    if(EXTERNAL_STD_COMPAT_PCM)
+        set(LOGGER_STD_COMPAT_PCM "${EXTERNAL_STD_COMPAT_PCM}" CACHE PATH "Path to logger's precompiled std.compat.pcm" FORCE)
+    elseif(BIGBROTHER_STD_COMPAT_PCM)
+        set(LOGGER_STD_COMPAT_PCM "${BIGBROTHER_STD_COMPAT_PCM}" CACHE PATH "Path to logger's precompiled std.compat.pcm" FORCE)
+    endif()
+    if(EXTERNAL_STD_PCM_FLAGS)
+        set(LOGGER_STD_PCM_FLAGS "${EXTERNAL_STD_PCM_FLAGS}" CACHE STRING "Compiler flags used for logger's std.pcm" FORCE)
+    elseif(BIGBROTHER_STD_PCM_FLAGS)
+        set(LOGGER_STD_PCM_FLAGS "${BIGBROTHER_STD_PCM_FLAGS}" CACHE STRING "Compiler flags used for logger's std.pcm" FORCE)
+    endif()
+    # The target name the rest of the tree calls add_dependencies() on still has to exist.
+    add_custom_target(build_logger_std_modules)
+    if(TARGET std_module_build)
+        add_dependencies(build_logger_std_modules std_module_build)
+    endif()
+    mark_as_advanced(LOGGER_STD_PCM LOGGER_STD_COMPAT_PCM LOGGER_STD_PCM_FLAGS LOGGER_STD_PCM_DIR)
+    message(STATUS "logger std.pcm: reusing superproject BMI -> ${LOGGER_STD_PCM}")
+
 elseif(NOT CMAKE_CXX_MODULE_STD AND CMAKE_CXX_COMPILER_ID MATCHES "Clang"
        AND (NOT WIN32 OR LIBCXX_MODULES_PATH))
     # libc++ std.pcm precompile (a service exported to parent projects via
