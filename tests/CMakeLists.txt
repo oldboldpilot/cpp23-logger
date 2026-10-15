@@ -56,3 +56,31 @@ endif()
 add_test(NAME test_logger COMMAND test_logger)
 add_test(NAME test_nested_templates COMMAND test_nested_templates)
 add_test(NAME test_functional_templates COMMAND test_functional_templates)
+
+# ============================================================================
+# The documentation citation gate's OWN gate
+# ============================================================================
+#
+# `tools/check_docs_claims.py` is this repository's documentation gate: every code name a
+# Markdown file cites in backticks must exist in the tracked sources. `config/cpp_details.txt`
+# and `config/update_policy.txt` both name it, and `tools/test_check_docs_claims.sh` is the
+# self-test that proves THIS COPY of the gate still detects what it claims to.
+#
+# Until now the self-test was carried here and reachable only by hand, so it passed whenever
+# somebody remembered to type it -- which is indistinguishable from a gate that passes, and is
+# exactly the defect the citation gate exists to catch in prose. sensen and
+# ThinButQuickWebFramework register it as the ctest `check_docs_claims`; this is the same
+# registration, so the gate runs wherever the suite runs.
+#
+# `PROJECT_IS_TOP_LEVEL` is the guard. This repository is a submodule of sensen,
+# ThinButQuickWebFramework and OptionsAndFuturesCalculator, and each of those registers its
+# OWN copy of the gate against its OWN documentation. Without the guard a superproject's ctest
+# would also run this one, gating cpp23-logger's docs from a suite that is not about them.
+#
+# No build target and no WORKING_DIRECTORY: the script resolves its own directory and builds
+# its fixtures under TMPDIR, so it passes from any cwd.
+if(PROJECT_IS_TOP_LEVEL)
+    add_test(NAME check_docs_claims
+             COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/../tools/test_check_docs_claims.sh)
+    set_tests_properties(check_docs_claims PROPERTIES TIMEOUT 120 LABELS "docs;policy")
+endif()
