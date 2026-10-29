@@ -48,6 +48,8 @@ option(BUILD_BENCHMARKS "Build micro-benchmarks (perf harness)" OFF)
 option(ENABLE_CLANG_TIDY "Enable clang-tidy checks" OFF)
 option(ENABLE_NATIVE_OPTIMIZATIONS "Enable native CPU optimizations (AVX-512, AVX2, etc) to match parent project" OFF)
 option(ENABLE_OPENMP "Enable OpenMP parallel processing support" OFF)
+option(ENABLE_CXX26 "Enable upcoming C++26 standard (-std=c++26 / -std=c++2c) when supported" OFF)
+option(ENABLE_CXX26_REFLECTION "Enable upcoming C++26 static reflection (-freflection) in Clang when supported" OFF)
 
 # ============================================================================
 # Configurable Library Settings (for embedding in parent projects)
@@ -70,10 +72,14 @@ set(CPP23_LOGGER_OUTPUT_DIR "" CACHE PATH "Custom output directory for logger li
 set(CPP23_LOGGER_TARGET_NAME "${CPP23_LOGGER_TARGET_PREFIX}logger" CACHE STRING "Final logger target name" FORCE)
 
 # ============================================================================
-# C++23 Standard Requirement
+# C++23 / Upcoming C++26 Standard Requirement
 # ============================================================================
 
-set(CMAKE_CXX_STANDARD 23)
+if(ENABLE_CXX26)
+    set(CMAKE_CXX_STANDARD 26)
+else()
+    set(CMAKE_CXX_STANDARD 23)
+endif()
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
@@ -81,7 +87,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 # Compiler Detection and Configuration
 # ============================================================================
 
-# Check for C++23 modules support
+# Check for C++23 / C++26 modules support
 if(CMAKE_CXX_COMPILER_ID MATCHES "Clang" AND CMAKE_CXX_COMPILER_FRONTEND_VARIANT STREQUAL "MSVC")
     # clang-cl on Windows: uses the MSVC STL (and the MSVC std module, std.ixx),
     # NOT libc++. Must use the cl-style driver flags; -stdlib=libc++ is invalid.
@@ -109,12 +115,24 @@ elseif(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
     if(CMAKE_CXX_COMPILER_VERSION VERSION_LESS "17.0")
         message(FATAL_ERROR "Clang 17.0 or higher required for C++23 modules support")
     endif()
-    # Clang C++23 modules flags. On Windows, clang++ (GNU driver) targets the
+    if(ENABLE_CXX26)
+        set(_LOGGER_STD_FLAG "-std=c++26")
+    else()
+        set(_LOGGER_STD_FLAG "-std=c++23")
+    endif()
+    # Clang C++23/C++26 modules flags. On Windows, clang++ (GNU driver) targets the
     # MSVC ABI and uses the MSVC STL by default — -stdlib=libc++ does not apply.
     if(WIN32)
-        set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++23")
+        set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${_LOGGER_STD_FLAG}")
     else()
-        set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++23 -stdlib=libc++")
+        set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${_LOGGER_STD_FLAG} -stdlib=libc++")
+    endif()
+    if(ENABLE_CXX26_REFLECTION)
+        include(CheckCXXCompilerFlag)
+        check_cxx_compiler_flag("-freflection" COMPILER_HAS_FREFLECTION)
+        if(COMPILER_HAS_FREFLECTION)
+            set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -freflection")
+        endif()
     endif()
 
     # Optional: Add portable CPU optimizations if requested by parent project.

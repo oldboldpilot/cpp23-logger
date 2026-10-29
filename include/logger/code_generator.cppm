@@ -115,20 +115,43 @@ module;
 
 #include <algorithm>
 #include <cctype>
+#include <concepts>
 #include <cstdint>
 #include <functional>
 #include <map>
 #include <memory>
-#include <sstream>
 #include <string>
 #include <string_view>
+#include <tuple>
+#include <type_traits>
 #include <unordered_map>
+#include <utility>
 #include <variant>
 #include <vector>
+
+#if __cplusplus >= 202400L && defined(__cpp_impl_reflection) && __cpp_impl_reflection >= 202500L
+#if __has_include(<meta>)
+#include <meta>
+#define LOGGER_CODEGEN_HAS_CXX26_REFLECTION 1
+#elif __has_include(<experimental/meta>)
+#include <experimental/meta>
+#define LOGGER_CODEGEN_HAS_CXX26_REFLECTION 1
+#else
+#define LOGGER_CODEGEN_HAS_CXX26_REFLECTION 0
+#endif
+#else
+#define LOGGER_CODEGEN_HAS_CXX26_REFLECTION 0
+#endif
 
 export module logger.code_generator;
 
 export namespace logger::codegen {
+
+/**
+ * Compile-time feature detection for C++26 static reflection (P2996 ^^T / std::meta::info)
+ */
+inline constexpr bool kHasCxx26StaticReflection = (LOGGER_CODEGEN_HAS_CXX26_REFLECTION != 0);
+inline constexpr long kCxxStandardVersion = __cplusplus;
 
 /**
  * ============================================================================
@@ -170,7 +193,7 @@ export namespace logger::codegen {
     bool first_char = true;
 
     for (char c : str) {
-        if (c == '_' || c == '-' || c == ' ') {
+        if (c == '_' || c == '-' || c == '.' || c == ' ') {
             capitalize_next = true;
         } else if (capitalize_next) {
             result += static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
@@ -215,8 +238,8 @@ export namespace logger::codegen {
             result += '_';
         }
 
-        // Replace spaces and hyphens with underscores
-        if (c == ' ' || c == '-') {
+        // Replace spaces, dots, and hyphens with underscores
+        if (c == ' ' || c == '-' || c == '.') {
             result += '_';
         } else {
             result += static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
@@ -261,18 +284,27 @@ export namespace logger::codegen {
  * Indent each line by specified number of spaces
  */
 [[nodiscard]] inline auto indent(std::string_view str, int spaces) -> std::string {
-    std::string padding(spaces, ' ');
-    std::ostringstream result;
-    std::istringstream input{std::string(str)};
-    std::string line;
-
-    while (std::getline(input, line)) {
-        result << padding << line << '\n';
+    if (spaces <= 0 || str.empty()) {
+        return std::string(str);
     }
+    std::string padding(static_cast<std::size_t>(spaces), ' ');
+    std::string output;
+    output.reserve(str.size() + padding.size() * 8);
 
-    std::string output = result.str();
-    if (!output.empty() && output.back() == '\n') {
-        output.pop_back(); // Remove trailing newline
+    std::size_t pos = 0;
+    while (pos < str.size()) {
+        auto nl = str.find('\n', pos);
+        if (nl == std::string_view::npos) {
+            output.append(padding);
+            output.append(str.substr(pos));
+            break;
+        }
+        output.append(padding);
+        output.append(str.substr(pos, nl - pos));
+        if (nl + 1 < str.size()) {
+            output.push_back('\n');
+        }
+        pos = nl + 1;
     }
 
     return output;
@@ -282,26 +314,39 @@ export namespace logger::codegen {
  * Wrap text to specified width
  */
 [[nodiscard]] inline auto wrap(std::string_view str, int width) -> std::string {
-    std::ostringstream result;
-    std::istringstream words{std::string(str)};
-    std::string word;
+    std::string result;
+    result.reserve(str.size());
     int line_length = 0;
+    std::size_t pos = 0;
 
-    while (words >> word) {
+    while (pos < str.size()) {
+        while (pos < str.size() && (std::isspace(static_cast<unsigned char>(str[pos])) != 0)) {
+            ++pos;
+        }
+        if (pos >= str.size()) {
+            break;
+        }
+        std::size_t end = pos;
+        while (end < str.size() && (std::isspace(static_cast<unsigned char>(str[end])) == 0)) {
+            ++end;
+        }
+        auto word = str.substr(pos, end - pos);
         if (line_length + static_cast<int>(word.length()) + 1 > width) {
-            result << '\n' << word;
+            result.push_back('\n');
+            result.append(word);
             line_length = static_cast<int>(word.length());
         } else {
             if (line_length > 0) {
-                result << ' ';
+                result.push_back(' ');
                 line_length++;
             }
-            result << word;
+            result.append(word);
             line_length += static_cast<int>(word.length());
         }
+        pos = end;
     }
 
-    return result.str();
+    return result;
 }
 
 /**
@@ -372,12 +417,18 @@ export namespace logger::codegen {
     if (items.empty())
         return "";
 
-    std::ostringstream result;
-    result << items[0];
-    for (size_t i = 1; i < items.size(); ++i) {
-        result << delimiter << items[i];
+    std::size_t total_len = (items.size() - 1) * delimiter.size();
+    for (auto const& s : items) {
+        total_len += s.size();
     }
-    return result.str();
+    std::string result;
+    result.reserve(total_len);
+    result.append(items[0]);
+    for (size_t i = 1; i < items.size(); ++i) {
+        result.append(delimiter);
+        result.append(items[i]);
+    }
+    return result;
 }
 
 /**
@@ -453,8 +504,10 @@ class TemplateValue {
             return std::get<std::int64_t>(value_) != 0;
         if (isDouble())
             return std::get<double>(value_) != 0.0;
-        if (isString())
-            return !std::get<std::string>(value_).empty();
+        if (isString()) {
+            auto const& s = std::get<std::string>(value_);
+            return !s.empty() && s != "false" && s != "False" && s != "0";
+        }
         if (isArray())
             return !std::get<TemplateArray>(value_).empty();
         return false;
@@ -511,6 +564,170 @@ class TemplateValue {
 
   private:
     ValueType value_;
+};
+
+/**
+ * ============================================================================
+ * C++26 Static Reflection (P2996 ^^T / std::meta::info) + C++23 Compile-Time
+ * Member-Descriptor Reflection Bridge for Struct-to-Template Serialization
+ * ============================================================================
+ */
+
+template <typename Class, typename MemberType>
+struct FieldDescriptor {
+    std::string_view name;
+    MemberType Class::* member_ptr;
+};
+
+template <typename Class, typename MemberType>
+[[nodiscard]] constexpr auto makeField(std::string_view name, MemberType Class::* ptr) noexcept
+    -> FieldDescriptor<Class, MemberType> {
+    return FieldDescriptor<Class, MemberType>{name, ptr};
+}
+
+template <typename T>
+concept HasReflectedFields = requires {
+    { T::reflectedFields() };
+};
+
+#if LOGGER_CODEGEN_HAS_CXX26_REFLECTION
+template <typename T>
+concept ReflectableStruct = HasReflectedFields<T> || std::is_class_v<std::remove_cvref_t<T>>;
+#else
+template <typename T>
+concept ReflectableStruct = HasReflectedFields<T>;
+#endif
+
+template <typename T>
+[[nodiscard]] auto reflectStructToTemplateObject(T const& obj) -> TemplateObject;
+
+template <typename T>
+[[nodiscard]] auto toTemplateValue(T const& val) -> TemplateValue {
+    using Decayed = std::remove_cvref_t<T>;
+    if constexpr (std::is_same_v<Decayed, TemplateValue>) {
+        return val;
+    } else if constexpr (std::is_same_v<Decayed, TemplateObject> ||
+                         std::is_same_v<Decayed, TemplateArray>) {
+        return TemplateValue{val};
+    } else if constexpr (std::is_same_v<Decayed, bool>) {
+        return TemplateValue{val};
+    } else if constexpr (std::is_integral_v<Decayed>) {
+        return TemplateValue{static_cast<std::int64_t>(val)};
+    } else if constexpr (std::is_floating_point_v<Decayed>) {
+        return TemplateValue{static_cast<double>(val)};
+    } else if constexpr (std::is_same_v<Decayed, std::string>) {
+        return TemplateValue{val};
+    } else if constexpr (std::is_same_v<Decayed, std::string_view>) {
+        return TemplateValue{std::string(val)};
+    } else if constexpr (std::is_convertible_v<Decayed, char const*>) {
+        return TemplateValue{std::string(val != nullptr ? val : "")};
+    } else if constexpr (requires {
+                             typename Decayed::value_type;
+                             val.begin();
+                             val.end();
+                         } && !requires { typename Decayed::mapped_type; }) {
+        TemplateArray arr;
+        for (auto const& elem : val) {
+            arr.push_back(toTemplateValue(elem));
+        }
+        return TemplateValue{std::move(arr)};
+    } else if constexpr (requires {
+                             typename Decayed::key_type;
+                             typename Decayed::mapped_type;
+                             val.begin();
+                             val.end();
+                         }) {
+        TemplateObject obj_map;
+        for (auto const& [k, v] : val) {
+            obj_map[std::string(k)] = toTemplateValue(v);
+        }
+        return TemplateValue{std::move(obj_map)};
+    } else if constexpr (ReflectableStruct<Decayed>) {
+        return TemplateValue{reflectStructToTemplateObject(val)};
+    } else {
+        return TemplateValue{};
+    }
+}
+
+template <typename Class, typename... MemberTypes>
+[[nodiscard]] auto reflectStructWithFields(
+    Class const& obj,
+    FieldDescriptor<Class, MemberTypes> const&... fields) -> TemplateObject {
+    TemplateObject result;
+    ((result[std::string(fields.name)] = toTemplateValue(obj.*(fields.member_ptr))), ...);
+    return result;
+}
+
+template <typename T>
+[[nodiscard]] auto reflectStructToTemplateObject(T const& obj) -> TemplateObject {
+    using Decayed = std::remove_cvref_t<T>;
+    if constexpr (HasReflectedFields<Decayed>) {
+        TemplateObject result;
+        auto const fields = Decayed::reflectedFields();
+        std::apply(
+            [&](auto const&... field_desc) {
+                ((result[std::string(field_desc.name)] =
+                      toTemplateValue(obj.*(field_desc.member_ptr))),
+                 ...);
+            },
+            fields);
+        return result;
+    }
+#if LOGGER_CODEGEN_HAS_CXX26_REFLECTION
+    else if constexpr (std::is_class_v<Decayed>) {
+        // C++26 P2996 Static Reflection via ^^Decayed and std::meta::nonstatic_data_members_of
+        TemplateObject result;
+        static constexpr auto members = std::meta::nonstatic_data_members_of(^^Decayed);
+        template for (constexpr std::meta::info member : members) {
+            result[std::string(std::meta::identifier_of(member))] =
+                toTemplateValue(obj.[:member:]);
+        }
+        return result;
+    }
+#endif
+    else {
+        return TemplateObject{};
+    }
+}
+
+/**
+ * Built-in reflectable kernel configuration struct for C++23 / C++26 template rendering.
+ */
+struct ReflectedKernelConfig {
+    std::string model_name{"qwen38_27b"};
+    std::string family{"qwen3_5"};
+    std::size_t hidden_size{5120};
+    std::size_t num_layers{64};
+    std::size_t num_heads{40};
+    std::size_t num_kv_heads{8};
+    std::size_t head_dim{128};
+    std::size_t context_length{1048576};
+    std::size_t orig_context_length{131072};
+    std::string weight_quant{"llq16"};
+    std::string kv_quant{"fp8_e4m3"};
+    std::string rope_scheme{"yarn"};
+    double rope_scale{8.0};
+    double mscale{1.207944};
+    bool training_free{true};
+
+    static constexpr auto reflectedFields() noexcept {
+        return std::make_tuple(
+            makeField("model_name", &ReflectedKernelConfig::model_name),
+            makeField("family", &ReflectedKernelConfig::family),
+            makeField("hidden_size", &ReflectedKernelConfig::hidden_size),
+            makeField("num_layers", &ReflectedKernelConfig::num_layers),
+            makeField("num_heads", &ReflectedKernelConfig::num_heads),
+            makeField("num_kv_heads", &ReflectedKernelConfig::num_kv_heads),
+            makeField("head_dim", &ReflectedKernelConfig::head_dim),
+            makeField("context_length", &ReflectedKernelConfig::context_length),
+            makeField("orig_context_length", &ReflectedKernelConfig::orig_context_length),
+            makeField("weight_quant", &ReflectedKernelConfig::weight_quant),
+            makeField("kv_quant", &ReflectedKernelConfig::kv_quant),
+            makeField("rope_scheme", &ReflectedKernelConfig::rope_scheme),
+            makeField("rope_scale", &ReflectedKernelConfig::rope_scale),
+            makeField("mscale", &ReflectedKernelConfig::mscale),
+            makeField("training_free", &ReflectedKernelConfig::training_free));
+    }
 };
 
 /**
@@ -697,6 +914,56 @@ class FilterRegistry {
             if (fname == "suffix") {
                 return std::string(value) + farg;
             }
+            if (fname == "add" || fname == "sub" || fname == "mul" || fname == "div") {
+                try {
+                    const bool has_dot = (value.find('.') != std::string_view::npos) ||
+                                         (farg.find('.') != std::string::npos);
+                    if (!has_dot) {
+                        std::int64_t lv = std::stoll(std::string(trim(value)));
+                        std::int64_t rv = std::stoll(farg);
+                        if (fname == "add") return std::to_string(lv + rv);
+                        if (fname == "sub") return std::to_string(lv - rv);
+                        if (fname == "mul") return std::to_string(lv * rv);
+                        if (fname == "div") return rv != 0 ? std::to_string(lv / rv) : "0";
+                    } else {
+                        double lv = std::stod(std::string(trim(value)));
+                        double rv = std::stod(farg);
+                        if (fname == "add") return std::to_string(lv + rv);
+                        if (fname == "sub") return std::to_string(lv - rv);
+                        if (fname == "mul") return std::to_string(lv * rv);
+                        if (fname == "div") return rv != 0.0 ? std::to_string(lv / rv) : "0.0";
+                    }
+                } catch (...) {
+                    return std::string(value);
+                }
+            }
+            if (fname == "replace") {
+                auto arg_space = farg.find(' ');
+                std::string old_sub =
+                    (arg_space == std::string::npos) ? farg : trim(farg.substr(0, arg_space));
+                std::string new_sub =
+                    (arg_space == std::string::npos) ? "" : trim(farg.substr(arg_space + 1));
+                auto unquote = [](std::string s) -> std::string {
+                    if (s.size() >= 2 &&
+                        ((s.front() == '"' && s.back() == '"') ||
+                         (s.front() == '\'' && s.back() == '\''))) {
+                        return s.substr(1, s.size() - 2);
+                    }
+                    return s;
+                };
+                old_sub = unquote(old_sub);
+                new_sub = unquote(new_sub);
+                if (old_sub.empty()) {
+                    return std::string(value);
+                }
+                std::string out{value};
+                std::size_t rpos = 0;
+                while ((rpos = out.find(old_sub, rpos)) != std::string::npos) {
+                    out.replace(rpos, old_sub.size(), new_sub);
+                    rpos += new_sub.size();
+                }
+                return out;
+            }
         }
 
         return std::string(value); // Unknown filter - return unchanged
@@ -745,11 +1012,51 @@ class CodeGenerator {
         return *this;
     }
 
+    /**
+     * Set template data from any C++23/C++26 reflectable struct (via T::reflectedFields()
+     * or C++26 P2996 static reflection ^^T).
+     */
+    template <ReflectableStruct T>
+    auto setReflectedData(T const& obj) -> CodeGenerator& {
+        data_ = reflectStructToTemplateObject(obj);
+        return *this;
+    }
+
+    /**
+     * Set template data from an arbitrary struct with explicit compile-time FieldDescriptors.
+     */
+    template <typename Class, typename... MemberTypes>
+    auto setReflectedData(Class const& obj,
+                          FieldDescriptor<Class, MemberTypes> const&... fields)
+        -> CodeGenerator& {
+        data_ = reflectStructWithFields(obj, fields...);
+        return *this;
+    }
+
     [[nodiscard]] auto render() const -> std::string { return processTemplate(template_, data_); }
 
     [[nodiscard]] auto render(std::string_view template_str, TemplateObject const& data) const
         -> std::string {
         return processTemplate(template_str, data);
+    }
+
+    /**
+     * Render a template directly from a C++23/C++26 reflectable struct.
+     */
+    template <ReflectableStruct T>
+    [[nodiscard]] auto renderReflected(std::string_view template_str, T const& obj) const
+        -> std::string {
+        return processTemplate(template_str, reflectStructToTemplateObject(obj));
+    }
+
+    /**
+     * Render a template directly from an arbitrary struct and explicit FieldDescriptors.
+     */
+    template <typename Class, typename... MemberTypes>
+    [[nodiscard]] auto renderReflected(
+        std::string_view template_str, Class const& obj,
+        FieldDescriptor<Class, MemberTypes> const&... fields) const -> std::string {
+        return processTemplate(template_str, reflectStructWithFields(obj, fields...));
     }
 
     auto reset() -> CodeGenerator& {
@@ -787,7 +1094,7 @@ class CodeGenerator {
                 return std::string_view::npos;
             }
             auto tag_expr = trim(text.substr(next_open + 2, close_brace - (next_open + 2)));
-            if (!tag_expr.empty() && tag_expr[0] == '#') {
+            if (!tag_expr.empty() && (tag_expr[0] == '#' || tag_expr[0] == '^')) {
                 auto inner = trim(tag_expr.substr(1));
                 if ((kind == "if" && inner.starts_with("if ")) ||
                     (kind == "each" && inner.starts_with("each ")) ||
@@ -802,7 +1109,8 @@ class CodeGenerator {
     }
 
     /**
-     * Find top-level {{else}} inside section_content (ignoring {{else}} inside nested sections).
+     * Find top-level {{else}}, {{else if ...}}, or {{elif ...}} inside section_content
+     * (ignoring tags inside nested sections).
      */
     [[nodiscard]] static auto findTopLevelElse(std::string_view section_content) -> std::size_t {
         int depth = 0;
@@ -817,13 +1125,15 @@ class CodeGenerator {
                 return std::string_view::npos;
             }
             auto tag_expr = trim(section_content.substr(next_tag + 2, close_tag - (next_tag + 2)));
-            if (!tag_expr.empty() && tag_expr[0] == '#') {
+            if (!tag_expr.empty() && (tag_expr[0] == '#' || tag_expr[0] == '^')) {
                 ++depth;
             } else if (!tag_expr.empty() && tag_expr[0] == '/') {
                 if (depth > 0) {
                     --depth;
                 }
-            } else if (depth == 0 && tag_expr == "else") {
+            } else if (depth == 0 &&
+                       (tag_expr == "else" || tag_expr.starts_with("else if ") ||
+                        tag_expr.starts_with("elif "))) {
                 return next_tag;
             }
             pos = close_tag + 2;
@@ -832,10 +1142,35 @@ class CodeGenerator {
     }
 
     /**
-     * Evaluate a conditional expression (supports variable truthiness and ==, !=, >=, <=, >, <).
+     * Evaluate a conditional expression (supports ||, &&, !, variable truthiness, and ==, !=, >=, <=, >, <).
      */
     [[nodiscard]] auto evaluateCondition(std::string_view cond_expr,
                                          TemplateObject const& data) const -> bool {
+        auto trimmed_expr = trim(cond_expr);
+        if (trimmed_expr.empty()) {
+            return false;
+        }
+
+        // Top-level logical OR: ||
+        auto or_pos = trimmed_expr.find("||");
+        if (or_pos != std::string_view::npos) {
+            return evaluateCondition(trimmed_expr.substr(0, or_pos), data) ||
+                   evaluateCondition(trimmed_expr.substr(or_pos + 2), data);
+        }
+
+        // Top-level logical AND: &&
+        auto and_pos = trimmed_expr.find("&&");
+        if (and_pos != std::string_view::npos) {
+            return evaluateCondition(trimmed_expr.substr(0, and_pos), data) &&
+                   evaluateCondition(trimmed_expr.substr(and_pos + 2), data);
+        }
+
+        // Leading logical NOT: !expr (avoiding !=)
+        if (trimmed_expr[0] == '!' &&
+            (trimmed_expr.size() < 2 || trimmed_expr[1] != '=')) {
+            return !evaluateCondition(trimmed_expr.substr(1), data);
+        }
+
         auto strip_quotes = [](std::string s) -> std::string {
             s = trim(s);
             if (s.size() >= 2 &&
@@ -847,10 +1182,10 @@ class CodeGenerator {
         };
 
         for (std::string_view op : {"==", "!=", ">=", "<=", ">", "<"}) {
-            auto op_pos = cond_expr.find(op);
+            auto op_pos = trimmed_expr.find(op);
             if (op_pos != std::string_view::npos) {
-                auto lhs_key = trim(cond_expr.substr(0, op_pos));
-                auto rhs_raw = trim(cond_expr.substr(op_pos + op.size()));
+                auto lhs_key = trim(trimmed_expr.substr(0, op_pos));
+                auto rhs_raw = trim(trimmed_expr.substr(op_pos + op.size()));
                 auto lhs_val = getVariable(lhs_key, data);
                 auto rhs_val = (rhs_raw.size() >= 2 && (rhs_raw.front() == '"' || rhs_raw.front() == '\''))
                                    ? strip_quotes(rhs_raw)
@@ -879,7 +1214,7 @@ class CodeGenerator {
             }
         }
 
-        std::string clean_name = std::string(trim(cond_expr));
+        std::string clean_name = std::string(trimmed_expr);
         if (clean_name.size() >= 3 && clean_name.substr(0, 3) == "../") {
             clean_name = clean_name.substr(3);
         }
@@ -893,19 +1228,20 @@ class CodeGenerator {
      */
     [[nodiscard]] auto processTemplate(std::string_view template_str,
                                        TemplateObject const& data) const -> std::string {
-        std::ostringstream result;
+        std::string result;
+        result.reserve(template_str.size());
         std::string_view remaining = template_str;
 
         while (!remaining.empty()) {
             auto start_pos = remaining.find("{{");
 
             if (start_pos == std::string_view::npos) {
-                result << remaining;
+                result.append(remaining);
                 break;
             }
 
             // Append text before placeholder
-            result << remaining.substr(0, start_pos);
+            result.append(remaining.substr(0, start_pos));
 
             // Check for raw block {{{{raw}}}}...{{{{/raw}}}}
             if (remaining.substr(start_pos).starts_with("{{{{raw}}}}")) {
@@ -913,8 +1249,8 @@ class CodeGenerator {
                 constexpr std::string_view raw_close = "{{{{/raw}}}}";
                 auto raw_end = remaining.find(raw_close, start_pos + raw_open.size());
                 if (raw_end != std::string_view::npos) {
-                    result << remaining.substr(start_pos + raw_open.size(),
-                                               raw_end - (start_pos + raw_open.size()));
+                    result.append(remaining.substr(start_pos + raw_open.size(),
+                                                   raw_end - (start_pos + raw_open.size())));
                     remaining = remaining.substr(raw_end + raw_close.size());
                     continue;
                 }
@@ -932,7 +1268,7 @@ class CodeGenerator {
             std::string end_delim = is_triple_brace ? "}}}" : "}}";
             auto end_pos = remaining.find(end_delim, expr_start);
             if (end_pos == std::string_view::npos) {
-                result << remaining.substr(start_pos);
+                result.append(remaining.substr(start_pos));
                 break;
             }
 
@@ -951,29 +1287,29 @@ class CodeGenerator {
                 std::string partial_name = trim(expr.substr(1));
                 auto pit = partials_.find(partial_name);
                 if (pit != partials_.end()) {
-                    result << processTemplate(pit->second, data);
+                    result.append(processTemplate(pit->second, data));
                 }
                 remaining = remaining.substr(end_pos + end_delim.length());
                 continue;
             }
 
-            // 3. Section start {{#name}}, {{#if expr}}, {{#each name}}, {{#unless expr}}
-            if (!expr.empty() && expr[0] == '#') {
+            // 3. Section start {{#name}}, {{^name}}, {{#if expr}}, {{#each name}}, {{#unless expr}}
+            if (!expr.empty() && (expr[0] == '#' || expr[0] == '^')) {
+                bool invert_section = (expr[0] == '^');
                 std::string section_expr = std::string(trim(expr.substr(1)));
                 std::string section_name;
                 std::string section_kind;
                 std::string end_tag;
-                bool invert_section = false;
 
-                if (section_expr.size() >= 3 && section_expr.substr(0, 3) == "if ") {
+                if (!invert_section && section_expr.size() >= 3 && section_expr.substr(0, 3) == "if ") {
                     section_name = std::string(trim(section_expr.substr(3)));
                     section_kind = "if";
                     end_tag = "{{/if}}";
-                } else if (section_expr.size() >= 5 && section_expr.substr(0, 5) == "each ") {
+                } else if (!invert_section && section_expr.size() >= 5 && section_expr.substr(0, 5) == "each ") {
                     section_name = std::string(trim(section_expr.substr(5)));
                     section_kind = "each";
                     end_tag = "{{/each}}";
-                } else if (section_expr.size() >= 7 && section_expr.substr(0, 7) == "unless ") {
+                } else if (!invert_section && section_expr.size() >= 7 && section_expr.substr(0, 7) == "unless ") {
                     section_name = std::string(trim(section_expr.substr(7)));
                     section_kind = "unless";
                     end_tag = "{{/unless}}";
@@ -992,28 +1328,29 @@ class CodeGenerator {
                     remaining, end_pos + end_delim.length(), section_kind, end_tag);
 
                 if (section_end == std::string_view::npos) {
-                    result << processExpression(expr, data);
+                    result.append(processExpression(expr, data));
                     remaining = remaining.substr(end_pos + end_delim.length());
                     continue;
                 }
 
                 auto section_content = remaining.substr(
                     end_pos + end_delim.length(), section_end - (end_pos + end_delim.length()));
-                result << processSection(section_name, section_kind, section_content, data,
-                                         invert_section);
+                result.append(processSection(section_name, section_kind, section_content, data,
+                                             invert_section));
                 remaining = remaining.substr(section_end + end_tag.length());
             } else {
                 // Regular variable or filter pipeline expression
-                result << processExpression(expr, data);
+                result.append(processExpression(expr, data));
                 remaining = remaining.substr(end_pos + end_delim.length());
             }
         }
 
-        return result.str();
+        return result;
     }
 
     /**
-     * Process a section {{#name}}...{{/name}}, {{#if}}...{{/if}}, {{#each}}...{{/each}}, or {{#unless}}...{{/unless}}
+     * Process a section {{#name}}...{{/name}}, {{^name}}...{{/name}}, {{#if}}...{{/if}},
+     * {{#each}}...{{/each}}, or {{#unless}}...{{/unless}}
      */
     [[nodiscard]] auto processSection(std::string const& name, std::string_view kind,
                                       std::string_view section_content,
@@ -1021,20 +1358,33 @@ class CodeGenerator {
                                       bool invert_section = false) const -> std::string {
         std::string_view true_content = section_content;
         std::string_view false_content = "";
+        std::string else_if_cond;
 
         auto else_pos = findTopLevelElse(section_content);
         if (else_pos != std::string_view::npos) {
             auto close_else = section_content.find("}}", else_pos + 2);
             true_content = section_content.substr(0, else_pos);
-            false_content = (close_else != std::string_view::npos)
-                                ? section_content.substr(close_else + 2)
-                                : std::string_view{};
+            if (close_else != std::string_view::npos) {
+                auto tag_expr = trim(section_content.substr(else_pos + 2, close_else - (else_pos + 2)));
+                if (tag_expr.starts_with("else if ")) {
+                    else_if_cond = trim(tag_expr.substr(8));
+                } else if (tag_expr.starts_with("elif ")) {
+                    else_if_cond = trim(tag_expr.substr(5));
+                }
+                false_content = section_content.substr(close_else + 2);
+            }
         }
 
         if (kind == "if" || invert_section) {
             const bool cond = evaluateCondition(name, data);
             const bool take_true = invert_section ? !cond : cond;
-            return std::string(processTemplate(take_true ? true_content : false_content, data));
+            if (take_true) {
+                return std::string(processTemplate(true_content, data));
+            }
+            if (!else_if_cond.empty()) {
+                return processSection(else_if_cond, "if", false_content, data, false);
+            }
+            return std::string(processTemplate(false_content, data));
         }
 
         TemplateValue root{data};
@@ -1046,7 +1396,8 @@ class CodeGenerator {
                 return std::string(processTemplate(false_content, data));
             }
 
-            std::ostringstream result;
+            std::string result;
+            result.reserve(true_content.size() * array.size());
             for (std::size_t idx = 0; idx < array.size(); ++idx) {
                 auto const& item = array[idx];
                 TemplateObject merged_data = data;
@@ -1064,9 +1415,9 @@ class CodeGenerator {
                 } else {
                     merged_data["."] = item;
                 }
-                result << processTemplate(true_content, merged_data);
+                result.append(processTemplate(true_content, merged_data));
             }
-            return result.str();
+            return result;
         }
 
         if (value.asBool()) {
@@ -1137,6 +1488,22 @@ class MultiBackendKernelBuilder {
         return *this;
     }
 
+    auto setArchitectureFamily(std::string family) -> MultiBackendKernelBuilder& {
+        arch_family_ = std::move(family);
+        return *this;
+    }
+
+    auto setDimensions(std::size_t hidden_size, std::size_t num_layers, std::size_t num_heads,
+                       std::size_t num_kv_heads, std::size_t head_dim)
+        -> MultiBackendKernelBuilder& {
+        hidden_size_ = hidden_size;
+        num_layers_ = num_layers;
+        num_heads_ = num_heads;
+        num_kv_heads_ = num_kv_heads;
+        head_dim_ = head_dim;
+        return *this;
+    }
+
     auto setContextLength(std::size_t ctx_len, std::size_t orig_ctx_len = 131072)
         -> MultiBackendKernelBuilder& {
         ctx_len_ = ctx_len;
@@ -1158,15 +1525,56 @@ class MultiBackendKernelBuilder {
         return *this;
     }
 
+    auto setYarnParameters(double beta_fast, double beta_slow, double mscale, double mscale_all_dim,
+                           bool dynamic_ntk = true) -> MultiBackendKernelBuilder& {
+        beta_fast_ = beta_fast;
+        beta_slow_ = beta_slow;
+        mscale_ = mscale;
+        mscale_all_dim_ = mscale_all_dim;
+        dynamic_ntk_ = dynamic_ntk;
+        return *this;
+    }
+
+    auto setAdapterMode(std::string mode, bool training_free = false)
+        -> MultiBackendKernelBuilder& {
+        mode_ = std::move(mode);
+        training_free_ = training_free;
+        return *this;
+    }
+
+    auto registerPartial(std::string name, std::string partial_template)
+        -> MultiBackendKernelBuilder& {
+        gen_.registerPartial(std::move(name), std::move(partial_template));
+        return *this;
+    }
+
+    auto registerFilter(std::string name, FilterFunction filter) -> MultiBackendKernelBuilder& {
+        gen_.registerFilter(std::move(name), std::move(filter));
+        return *this;
+    }
+
     [[nodiscard]] auto buildTemplateData() const -> TemplateObject {
         return TemplateObject{
             {"model_name", TemplateValue{model_name_}},
+            {"family", TemplateValue{arch_family_}},
+            {"hidden_size", TemplateValue{hidden_size_}},
+            {"num_layers", TemplateValue{num_layers_}},
+            {"num_heads", TemplateValue{num_heads_}},
+            {"num_kv_heads", TemplateValue{num_kv_heads_}},
+            {"head_dim", TemplateValue{head_dim_}},
             {"context_length", TemplateValue{ctx_len_}},
             {"orig_context_length", TemplateValue{orig_ctx_len_}},
             {"weight_quant", TemplateValue{weight_quant_}},
             {"kv_quant", TemplateValue{kv_quant_}},
             {"rope_scheme", TemplateValue{rope_scheme_}},
             {"rope_scale", TemplateValue{rope_scale_}},
+            {"beta_fast", TemplateValue{beta_fast_}},
+            {"beta_slow", TemplateValue{beta_slow_}},
+            {"mscale", TemplateValue{mscale_}},
+            {"mscale_all_dim", TemplateValue{mscale_all_dim_}},
+            {"dynamic_ntk", TemplateValue{dynamic_ntk_}},
+            {"mode", TemplateValue{mode_}},
+            {"training_free", TemplateValue{training_free_}},
         };
     }
 
@@ -1179,15 +1587,131 @@ class MultiBackendKernelBuilder {
         return gen_.render(tmpl, data);
     }
 
+    [[nodiscard]] auto renderWithVars(
+        std::string_view tmpl,
+        std::vector<std::pair<std::string, std::string>> const& vars,
+        std::vector<std::pair<std::string, std::string>> const& partials = {}) const -> std::string {
+        CodeGenerator local_gen = gen_;
+        for (auto const& [pname, pbody] : partials) {
+            local_gen.registerPartial(pname, pbody);
+        }
+        auto data = buildTemplateData();
+        for (auto const& [k, v] : vars) {
+            data[k] = TemplateValue{v};
+        }
+        return local_gen.render(tmpl, data);
+    }
+
+    [[nodiscard]] auto renderCudaKernel() const -> std::string {
+        static constexpr std::string_view kCudaTemplate = R"TMPL(// CUDA 1M-Context Kernel ({{model_name | c_ident}}, {{rope_scheme | upper}}, {{weight_quant}}/{{kv_quant}})
+#include <cuda_fp16.h>
+#include <cstdint>
+namespace sensen::generated::cuda {
+static constexpr std::size_t kContextLength = {{context_length}};
+static constexpr std::size_t kOrigContextLength = {{orig_context_length}};
+static constexpr double kRopeScale = {{rope_scale}};
+{{model_name | c_ident | cuda_global}}_yarn_llq_kernel(float* __restrict__ q, const float* __restrict__ k, std::size_t seq_pos) {
+    const std::size_t tid = static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (tid < {{head_dim}}) { q[tid] *= static_cast<float>({{mscale}}); }
+}
+} // namespace sensen::generated::cuda
+)TMPL";
+        return renderCustom(kCudaTemplate);
+    }
+
+    [[nodiscard]] auto renderCpuMultiregisterSimdKernel() const -> std::string {
+        static constexpr std::string_view kCpuSimdTemplate = R"TMPL(// CPU Multi-Register SIMD (AVX-512 / AVX2 / AMX / NEON) 1M-Context Kernel ({{model_name | c_ident}})
+#include <immintrin.h>
+#include <cstddef>
+namespace sensen::generated::cpu_simd {
+static constexpr std::size_t kContextLength = {{context_length}};
+{{model_name | c_ident | simd_avx512_attr}} void run_avx512_multiregister(float* dst, const float* src, std::size_t n) noexcept {
+    std::size_t i = 0;
+    for (; i + 64 <= n; i += 64) {
+        __m512 z0 = _mm512_loadu_ps(src + i);
+        __m512 z1 = _mm512_loadu_ps(src + i + 16);
+        __m512 z2 = _mm512_loadu_ps(src + i + 32);
+        __m512 z3 = _mm512_loadu_ps(src + i + 48);
+        _mm512_storeu_ps(dst + i, z0);
+        _mm512_storeu_ps(dst + i + 16, z1);
+        _mm512_storeu_ps(dst + i + 32, z2);
+        _mm512_storeu_ps(dst + i + 48, z3);
+    }
+}
+} // namespace sensen::generated::cpu_simd
+)TMPL";
+        return renderCustom(kCpuSimdTemplate);
+    }
+
+    [[nodiscard]] auto renderVulkanComputeShader() const -> std::string {
+        static constexpr std::string_view kVulkanTemplate = R"TMPL(#version 460
+#extension GL_KHR_cooperative_matrix : enable
+// Vulkan Compute Shader ({{model_name | c_ident}}, {{rope_scheme | upper}}, {{context_length}} tokens)
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+layout(set = 0, binding = 0) buffer InOutBuf { float data[]; } buf;
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx < {{head_dim}}u) { buf.data[idx] *= float({{mscale}}); }
+}
+)TMPL";
+        return renderCustom(kVulkanTemplate);
+    }
+
+    [[nodiscard]] auto renderMlxAppleSiliconKernel() const -> std::string {
+        static constexpr std::string_view kMlxTemplate = R"TMPL(# Apple MLX Unified-Memory Metal Kernel ({{model_name | c_ident}}, {{rope_scheme | upper}}, {{context_length}} tokens)
+import mlx.core as mx
+MODEL_NAME = "{{model_name | c_ident}}"
+CONTEXT_LENGTH = {{context_length}}
+WEIGHT_QUANT = "{{weight_quant}}"
+KV_QUANT = "{{kv_quant}}"
+)TMPL";
+        return renderCustom(kMlxTemplate);
+    }
+
+    [[nodiscard]] auto renderTritonKernel() const -> std::string {
+        static constexpr std::string_view kTritonTemplate = R"TMPL(# OpenAI Triton 1M-Context Kernel ({{model_name | c_ident}}, {{rope_scheme | upper}}, {{context_length}} tokens)
+import triton
+import triton.language as tl
+MODEL_NAME = "{{model_name | c_ident}}"
+CONTEXT_LENGTH = {{context_length}}
+WEIGHT_QUANT = "{{weight_quant}}"
+KV_QUANT = "{{kv_quant}}"
+)TMPL";
+        return renderCustom(kTritonTemplate);
+    }
+
+    [[nodiscard]] auto renderAllBackends() const -> std::map<std::string, std::string> {
+        return {
+            {"cuda", renderCudaKernel()},
+            {"cpu_simd", renderCpuMultiregisterSimdKernel()},
+            {"vulkan", renderVulkanComputeShader()},
+            {"mlx", renderMlxAppleSiliconKernel()},
+            {"triton", renderTritonKernel()},
+        };
+    }
+
   private:
     CodeGenerator gen_;
     std::string model_name_{"qwen38_27b"};
+    std::string arch_family_{"qwen3_5"};
+    std::size_t hidden_size_{5120};
+    std::size_t num_layers_{64};
+    std::size_t num_heads_{40};
+    std::size_t num_kv_heads_{8};
+    std::size_t head_dim_{128};
     std::size_t ctx_len_{1048576};
     std::size_t orig_ctx_len_{131072};
     std::string weight_quant_{"llq_fused"};
     std::string kv_quant_{"llq_fused"};
     std::string rope_scheme_{"yarn"};
     double rope_scale_{8.0};
+    double beta_fast_{32.0};
+    double beta_slow_{1.0};
+    double mscale_{1.0};
+    double mscale_all_dim_{0.1};
+    bool dynamic_ntk_{true};
+    std::string mode_{"fused"};
+    bool training_free_{false};
 };
 
 } // namespace logger::codegen
