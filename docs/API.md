@@ -201,10 +201,12 @@ A service whose stdout carries data sets `console_stream` to `ConsoleStream::Std
 Rotation: when a write would push the file past `max_file_bytes` (or `max_file_size_mb`), the file
 becomes `path.1`, `path.1` becomes `path.2`, and so on up to `path.N` where N is `max_backup_files`;
 the oldest is removed. With N of 0 the file is truncated instead. The disk bound for one file set is
-`(N + 1)` times the size bound, plus one line. Rotation applies to records always. It applies to text entries only when `rotate_text` is true;
-the default is false because a TEXT log never rotated before this option existed, and existing
-consumers must not start rotating (and dropping old entries past `max_backup_files`) on upgrade.
-An explicit `rotate()` call rotates whatever the format.
+`(N + 1)` times the size bound, plus one line. Rotation applies to records always. TEXT behaves
+exactly as before JSON records existed (it never rotates) unless `rotate_text` is true; the default
+is false because existing consumers must not start rotating, and dropping old entries past
+`max_backup_files`, on upgrade. An explicit `rotate()` call rotates whatever the format. If the
+live file cannot be renamed to `path.1`, it is truncated so it stays bounded, the failure is
+counted once in `SinkStats::failed`, and `SinkStats::rotations` counts only rotations that succeeded.
 
 When a file is opened and its last byte is not `'\n'` (a torn last line after a crash), a newline is
 written first so the next record starts on its own line.

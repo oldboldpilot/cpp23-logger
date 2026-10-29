@@ -11,8 +11,6 @@
  * In a normal build it still checks that no record is lost, torn or double counted.
  */
 
-#include <cassert>
-
 import std;
 import logger;
 
@@ -20,6 +18,14 @@ using namespace logger;
 namespace fs = std::filesystem;
 
 namespace {
+
+/// Aborts with the call site when `ok` is false. Unlike assert() it cannot be compiled out.
+auto check(bool ok, std::source_location const loc = std::source_location::current()) -> void {
+    if (!ok) {
+        std::cerr << "CHECK FAILED at line " << loc.line() << '\n';
+        std::abort();
+    }
+}
 
 auto readLines(fs::path const& p) -> std::vector<std::string> {
     std::ifstream in(p, std::ios::binary);
@@ -87,25 +93,25 @@ auto test_jsonl_written_verbatim(fs::path const& dir) -> void {
         R"({"msg":"quote \" and backslash \\ and unicode é"})",
         R"({"k":[1,2,3],"nested":{"a":null}})"};
     for (auto const& r : records) {
-        assert(log.writeRecord(LogLevel::INFO, r) == RecordWrite::Written);
+        check(log.writeRecord(LogLevel::INFO, r) == RecordWrite::Written);
     }
-    assert(readLines(file) == records);
-    assert(readAll(file).back() == '\n');
+    check(readLines(file) == records);
+    check(readAll(file).back() == '\n');
 
     auto expected_bytes = std::size_t{0};
     for (auto const& r : records) {
         expected_bytes += r.size() + 1;
     }
-    assert(fs::file_size(file) == expected_bytes);
-    assert(log.getCurrentLogFileSize() == expected_bytes);
-    assert(log.getTotalLogsWritten() == 3);
+    check(fs::file_size(file) == expected_bytes);
+    check(log.getCurrentLogFileSize() == expected_bytes);
+    check(log.getTotalLogsWritten() == 3);
     auto const stats = log.getSinkStats();
-    assert(stats.written == 3 && stats.failed == 0 && stats.rejected == 0);
+    check(stats.written == 3 && stats.failed == 0 && stats.rejected == 0);
 
     // Below the minimum level: Filtered, nothing written.
-    assert(log.writeRecord(LogLevel::DEBUG, R"({"msg":"quiet"})") == RecordWrite::Filtered);
-    assert(log.getSinkStats().filtered == 1);
-    assert(readLines(file) == records);
+    check(log.writeRecord(LogLevel::DEBUG, R"({"msg":"quiet"})") == RecordWrite::Filtered);
+    check(log.getSinkStats().filtered == 1);
+    check(readLines(file) == records);
     std::cout << "  ✓ passed\n";
 }
 
@@ -119,12 +125,12 @@ auto test_text_methods_refused_in_json(fs::path const& dir) -> void {
     log.warn("value {}", 42);
     log.error("named {x}", {{"x", "y"}});
     auto const stats = log.getSinkStats();
-    assert(stats.rejected == 3);
-    assert(stats.written == 0);
-    assert(readAll(file).empty());
+    check(stats.rejected == 3);
+    check(stats.written == 0);
+    check(readAll(file).empty());
 
-    assert(log.writeRecord(LogLevel::INFO, R"({"ok":true})") == RecordWrite::Written);
-    assert(readLines(file) == std::vector<std::string>{R"({"ok":true})"});
+    check(log.writeRecord(LogLevel::INFO, R"({"ok":true})") == RecordWrite::Written);
+    check(readLines(file) == std::vector<std::string>{R"({"ok":true})"});
     std::cout << "  ✓ passed\n";
 }
 
@@ -134,17 +140,17 @@ auto test_newline_rejected(fs::path const& dir) -> void {
     auto& log = Logger::getInstance();
     log.initialize(jsonConfig(file));
 
-    assert(log.writeRecord(LogLevel::INFO, "{\"a\":1}\n{\"b\":2}") == RecordWrite::Rejected);
-    assert(log.writeRecord(LogLevel::INFO, "\n") == RecordWrite::Rejected);
-    assert(log.getSinkStats().rejected == 2);
-    assert(log.getSinkStats().written == 0);
-    assert(readAll(file).empty());
+    check(log.writeRecord(LogLevel::INFO, "{\"a\":1}\n{\"b\":2}") == RecordWrite::Rejected);
+    check(log.writeRecord(LogLevel::INFO, "\n") == RecordWrite::Rejected);
+    check(log.getSinkStats().rejected == 2);
+    check(log.getSinkStats().written == 0);
+    check(readAll(file).empty());
     std::cout << "  ✓ passed\n";
 }
 
 auto writeSeq(Logger& log, int first, int last) -> void {
     for (int i = first; i <= last; ++i) {
-        assert(log.writeRecord(LogLevel::INFO, seqLine(i)) == RecordWrite::Written);
+        check(log.writeRecord(LogLevel::INFO, seqLine(i)) == RecordWrite::Written);
     }
 }
 
@@ -158,29 +164,29 @@ auto test_rotation_keeps_backups(fs::path const& dir) -> void {
     log.initialize(cfg);
 
     writeSeq(log, 1, 11);
-    assert(readLines(file) == std::vector<std::string>{seqLine(11)});
-    assert((readLines(backup(file, 1)) == std::vector<std::string>{seqLine(9), seqLine(10)}));
-    assert((readLines(backup(file, 2)) == std::vector<std::string>{seqLine(7), seqLine(8)}));
-    assert(!fs::exists(backup(file, 3))); // N backups kept, the oldest removed
+    check(readLines(file) == std::vector<std::string>{seqLine(11)});
+    check((readLines(backup(file, 1)) == std::vector<std::string>{seqLine(9), seqLine(10)}));
+    check((readLines(backup(file, 2)) == std::vector<std::string>{seqLine(7), seqLine(8)}));
+    check(!fs::exists(backup(file, 3))); // N backups kept, the oldest removed
     for (auto const& f : {file, backup(file, 1), backup(file, 2)}) {
-        assert(fs::file_size(f) <= 60);
+        check(fs::file_size(f) <= 60);
     }
-    assert(log.getSinkStats().rotations == 5);
-    assert(log.getSinkStats().written == 11);
-    assert(log.getCurrentLogFileSize() == 26);
+    check(log.getSinkStats().rotations == 5);
+    check(log.getSinkStats().written == 11);
+    check(log.getCurrentLogFileSize() == 26);
 
     // Explicit rotate(): everything shifts up, the live file is empty.
     log.rotate();
-    assert(fs::file_size(file) == 0 && log.getCurrentLogFileSize() == 0);
-    assert(readLines(backup(file, 1)) == std::vector<std::string>{seqLine(11)});
-    assert((readLines(backup(file, 2)) == std::vector<std::string>{seqLine(9), seqLine(10)}));
-    assert(!fs::exists(backup(file, 3)));
-    assert(log.getSinkStats().rotations == 6);
+    check(fs::file_size(file) == 0 && log.getCurrentLogFileSize() == 0);
+    check(readLines(backup(file, 1)) == std::vector<std::string>{seqLine(11)});
+    check((readLines(backup(file, 2)) == std::vector<std::string>{seqLine(9), seqLine(10)}));
+    check(!fs::exists(backup(file, 3)));
+    check(log.getSinkStats().rotations == 6);
 
     // A line longer than the bound goes into an empty file instead of rotating forever.
     auto const big = std::string(R"({"big":")") + std::string(100, 'z') + R"("})";
-    assert(log.writeRecord(LogLevel::INFO, big) == RecordWrite::Written);
-    assert(readLines(file) == std::vector<std::string>{big});
+    check(log.writeRecord(LogLevel::INFO, big) == RecordWrite::Written);
+    check(readLines(file) == std::vector<std::string>{big});
     std::cout << "  ✓ passed\n";
 }
 
@@ -194,11 +200,11 @@ auto test_rotation_zero_backups_truncates(fs::path const& dir) -> void {
     log.initialize(cfg);
 
     writeSeq(log, 1, 11);
-    assert(readLines(file) == std::vector<std::string>{seqLine(11)});
-    assert(!fs::exists(backup(file, 1)));
-    assert(!fs::exists(backup(file, 0)));
-    assert(fs::file_size(file) == 26 && log.getCurrentLogFileSize() == 26);
-    assert(log.getSinkStats().rotations == 5);
+    check(readLines(file) == std::vector<std::string>{seqLine(11)});
+    check(!fs::exists(backup(file, 1)));
+    check(!fs::exists(backup(file, 0)));
+    check(fs::file_size(file) == 26 && log.getCurrentLogFileSize() == 26);
+    check(log.getSinkStats().rotations == 5);
     std::cout << "  ✓ passed\n";
 }
 
@@ -211,15 +217,15 @@ auto test_torn_line_repair(fs::path const& dir) -> void {
     }
     auto& log = Logger::getInstance();
     log.initialize(jsonConfig(file));
-    assert(log.writeRecord(LogLevel::INFO, R"({"c":3})") == RecordWrite::Written);
-    assert((readLines(file) ==
+    check(log.writeRecord(LogLevel::INFO, R"({"c":3})") == RecordWrite::Written);
+    check((readLines(file) ==
             std::vector<std::string>{R"({"a":1})", R"({"b":)", R"({"c":3})"}));
-    assert(log.getCurrentLogFileSize() == fs::file_size(file));
+    check(log.getCurrentLogFileSize() == fs::file_size(file));
 
     // A clean file (ends in '\n') gets no extra blank line.
     log.initialize(jsonConfig(file));
-    assert(log.writeRecord(LogLevel::INFO, R"({"d":4})") == RecordWrite::Written);
-    assert(readLines(file).size() == 4);
+    check(log.writeRecord(LogLevel::INFO, R"({"d":4})") == RecordWrite::Written);
+    check(readLines(file).size() == 4);
     std::cout << "  ✓ passed\n";
 }
 
@@ -238,21 +244,21 @@ auto test_sink_failure_is_a_value(fs::path const& dir) -> void {
         log.initialize(cfg);
     }
     auto const failed_after_init = log.getSinkStats().failed;
-    assert(failed_after_init >= 1);
+    check(failed_after_init >= 1);
 
     auto const line = std::string(R"({"msg":"must survive"})");
     {
         Capture err(std::cerr);
-        assert(log.writeRecord(LogLevel::INFO, line) == RecordWrite::SinkFailed);
+        check(log.writeRecord(LogLevel::INFO, line) == RecordWrite::SinkFailed);
         // Console is off, so the line is written to stderr exactly once as a fallback.
         auto const text = err.str();
-        assert(text == line + "\n");
+        check(text == line + "\n");
     }
     auto const stats = log.getSinkStats();
-    assert(stats.failed == failed_after_init + 1);
-    assert(!stats.last_error.empty());
-    assert(stats.last_error.find("must survive") == std::string::npos); // never record content
-    assert(stats.written == 0);
+    check(stats.failed == failed_after_init + 1);
+    check(!stats.last_error.empty());
+    check(stats.last_error.find("must survive") == std::string::npos); // never record content
+    check(stats.written == 0);
 
     // The directory exists but the path is itself a directory: only open() fails, so
     // last_error comes from the open failure rather than from create_directories().
@@ -262,10 +268,10 @@ auto test_sink_failure_is_a_value(fs::path const& dir) -> void {
         Capture init_noise(std::cerr);
         log.initialize(jsonConfig(as_dir));
         auto const open_stats = log.getSinkStats();
-        assert(open_stats.failed == 1);
-        assert(!open_stats.last_error.empty());
-        assert(log.writeRecord(LogLevel::INFO, line) == RecordWrite::SinkFailed);
-        assert(log.getSinkStats().failed == 2);
+        check(open_stats.failed == 1);
+        check(!open_stats.last_error.empty());
+        check(log.writeRecord(LogLevel::INFO, line) == RecordWrite::SinkFailed);
+        check(log.getSinkStats().failed == 2);
     }
 
     // With the console on there is no second copy on stderr.
@@ -275,9 +281,9 @@ auto test_sink_failure_is_a_value(fs::path const& dir) -> void {
         Capture out(std::cout);
         log.initialize(cfg);
         Capture err(std::cerr);
-        assert(log.writeRecord(LogLevel::INFO, line) == RecordWrite::SinkFailed);
-        assert(err.str().empty());
-        assert(out.str() == line + "\n");
+        check(log.writeRecord(LogLevel::INFO, line) == RecordWrite::SinkFailed);
+        check(err.str().empty());
+        check(out.str() == line + "\n");
     }
     std::cout << "  ✓ passed\n";
 }
@@ -299,11 +305,11 @@ auto test_reopen_at_most_once_per_second(fs::path const& dir) -> void {
     fs::create_directory(gate);
     {
         Capture err(std::cerr);
-        assert(log.writeRecord(LogLevel::INFO, R"({"n":1})") == RecordWrite::SinkFailed);
+        check(log.writeRecord(LogLevel::INFO, R"({"n":1})") == RecordWrite::SinkFailed);
     }
     std::this_thread::sleep_for(std::chrono::milliseconds(1100));
-    assert(log.writeRecord(LogLevel::INFO, R"({"n":2})") == RecordWrite::Written);
-    assert(readLines(file) == std::vector<std::string>{R"({"n":2})"});
+    check(log.writeRecord(LogLevel::INFO, R"({"n":2})") == RecordWrite::Written);
+    check(readLines(file) == std::vector<std::string>{R"({"n":2})"});
     std::cout << "  ✓ passed\n";
 }
 
@@ -325,12 +331,12 @@ auto test_console_stream_stderr(fs::path const& dir) -> void {
     json_cfg.format = LogFormat::JSON;
     json_cfg.log_file_path = (dir / "console_err.jsonl").string();
     log.initialize(json_cfg);
-    assert(log.writeRecord(LogLevel::INFO, R"({"rec":"on stderr"})") == RecordWrite::Written);
+    check(log.writeRecord(LogLevel::INFO, R"({"rec":"on stderr"})") == RecordWrite::Written);
 
-    assert(out.str().empty());
-    assert(err.str().find("Logger initialized:") != std::string::npos);
-    assert(err.str().find("text on stderr 7") != std::string::npos);
-    assert(err.str().find(R"({"rec":"on stderr"})") != std::string::npos);
+    check(out.str().empty());
+    check(err.str().find("Logger initialized:") != std::string::npos);
+    check(err.str().find("text on stderr 7") != std::string::npos);
+    check(err.str().find(R"({"rec":"on stderr"})") != std::string::npos);
     std::cout.flush();
     std::cout << "  ✓ passed\n";
 }
@@ -350,8 +356,8 @@ auto test_announce_initialization_false(fs::path const& dir) -> void {
     log.initialize(cfg);
     cfg.file_output = false;
     log.initialize(cfg);
-    assert(out.str().empty());
-    assert(err.str().empty());
+    check(out.str().empty());
+    check(err.str().empty());
     std::cout << "  ✓ passed\n";
 }
 
@@ -362,23 +368,23 @@ auto test_file_output_false(fs::path const& dir) -> void {
     auto cfg = jsonConfig(file);
     cfg.file_output = false;
     log.initialize(cfg);
-    assert(log.writeRecord(LogLevel::INFO, R"({"x":1})") == RecordWrite::Written);
-    assert(!fs::exists(file) && !fs::exists(file.parent_path()));
-    assert(log.getSinkStats().failed == 0);
+    check(log.writeRecord(LogLevel::INFO, R"({"x":1})") == RecordWrite::Written);
+    check(!fs::exists(file) && !fs::exists(file.parent_path()));
+    check(log.getSinkStats().failed == 0);
     std::cout << "  ✓ passed\n";
 }
 
 auto test_old_defaults_unchanged(fs::path const& dir) -> void {
     std::cout << "Testing the old defaults are unchanged...\n";
     LoggerConfig const defaults;
-    assert(defaults.console_stream == ConsoleStream::Stdout);
-    assert(defaults.announce_initialization);
-    assert(defaults.file_output);
-    assert(defaults.max_file_bytes == 0);
-    assert(defaults.format == LogFormat::TEXT);
-    assert(defaults.console_output && defaults.console_color);
-    assert(!defaults.rotate_text);
-    assert(defaults.max_file_size_mb == 100 && defaults.max_backup_files == 5);
+    check(defaults.console_stream == ConsoleStream::Stdout);
+    check(defaults.announce_initialization);
+    check(defaults.file_output);
+    check(defaults.max_file_bytes == 0);
+    check(defaults.format == LogFormat::TEXT);
+    check(defaults.console_output && defaults.console_color);
+    check(!defaults.rotate_text);
+    check(defaults.max_file_size_mb == 100 && defaults.max_backup_files == 5);
 
     auto& log = Logger::getInstance();
     {
@@ -389,20 +395,20 @@ auto test_old_defaults_unchanged(fs::path const& dir) -> void {
         cfg.console_color = false;
         log.initialize(cfg);
         log.info("hello stdout");
-        assert(out.str().find("Logger initialized: " + cfg.log_file_path +
+        check(out.str().find("Logger initialized: " + cfg.log_file_path +
                               " (UTF-8, Color: OFF)") != std::string::npos);
-        assert(out.str().find("hello stdout") != std::string::npos);
-        assert(err.str().empty());
+        check(out.str().find("hello stdout") != std::string::npos);
+        check(err.str().empty());
     }
     {
         // The legacy overload keeps announcing on stdout too.
         Capture out(std::cout);
         log.initialize((dir / "legacy.log").string(), LogLevel::INFO, true);
-        assert(out.str().find("Logger initialized:") != std::string::npos);
+        check(out.str().find("Logger initialized:") != std::string::npos);
     }
     auto const lines = readLines(dir / "defaults.log");
-    assert(lines.size() == 1 && lines[0].find("hello stdout") != std::string::npos);
-    assert(log.getTotalLogsWritten() == 0); // initialize() restarted the counters
+    check(lines.size() == 1 && lines[0].find("hello stdout") != std::string::npos);
+    check(log.getTotalLogsWritten() == 0); // initialize() restarted the counters
     std::cout << "  ✓ passed\n";
 }
 
@@ -433,7 +439,7 @@ auto test_level_changes_under_concurrent_logging(fs::path const& dir) -> void {
                         ++filtered;
                         break;
                     default:
-                        assert(false && "unexpected result");
+                        check(false && "unexpected result");
                 }
                 (void)log.getLevel();
             }
@@ -447,13 +453,13 @@ auto test_level_changes_under_concurrent_logging(fs::path const& dir) -> void {
         w.join();
     }
 
-    assert(written + filtered == std::uint64_t{threads} * per_thread);
+    check(written + filtered == std::uint64_t{threads} * per_thread);
     auto const stats = log.getSinkStats();
-    assert(stats.written == written && stats.filtered == filtered && stats.failed == 0);
+    check(stats.written == written && stats.filtered == filtered && stats.failed == 0);
     auto const lines = readLines(file);
-    assert(lines.size() == written);
+    check(lines.size() == written);
     for (auto const& l : lines) {
-        assert(l == record);
+        check(l == record);
     }
     log.setLevel(LogLevel::INFO);
     std::cout << "  ✓ passed\n";
@@ -480,25 +486,25 @@ auto test_text_rotation_is_opt_in(fs::path const& dir) -> void {
     for (int i = 0; i < 40; ++i) {
         log.info("text line {}", i);
     }
-    assert(fs::file_size(off) > 200);
-    assert(!fs::exists(backup(off, 1)));
-    assert(log.getSinkStats().rotations == 0);
+    check(fs::file_size(off) > 200);
+    check(!fs::exists(backup(off, 1)));
+    check(log.getSinkStats().rotations == 0);
 
     auto const on = dir / "text_on.log";
     log.initialize(textConfig(on, true));
     for (int i = 0; i < 40; ++i) {
         log.info("text line {}", i);
     }
-    assert(fs::exists(backup(on, 1)));
-    assert(fs::file_size(on) <= 200);
-    assert(log.getSinkStats().rotations > 0);
+    check(fs::exists(backup(on, 1)));
+    check(fs::file_size(on) <= 200);
+    check(log.getSinkStats().rotations > 0);
 
     // Explicit rotate() rotates a TEXT log even with the flag off.
     auto const manual = dir / "text_manual.log";
     log.initialize(textConfig(manual, false));
     log.info("one line");
     log.rotate();
-    assert(fs::exists(backup(manual, 1)));
+    check(fs::exists(backup(manual, 1)));
     std::cout << "  ✓ passed\n";
 }
 
@@ -513,9 +519,77 @@ auto test_json_rotates_regardless_of_rotate_text(fs::path const& dir) -> void {
         cfg.rotate_text = flag;
         log.initialize(cfg);
         writeSeq(log, 1, 11);
-        assert(fs::exists(backup(file, 1)));
-        assert(log.getSinkStats().rotations == 5);
+        check(fs::exists(backup(file, 1)));
+        check(log.getSinkStats().rotations == 5);
     }
+    std::cout << "  ✓ passed\n";
+}
+
+auto countOpenHandles(fs::path const& file) -> int {
+    auto n = 0;
+    std::error_code ec;
+    for (auto const& e : fs::directory_iterator("/proc/self/fd", ec)) {
+        std::error_code lec;
+        if (fs::read_symlink(e.path(), lec) == file && !lec) {
+            ++n;
+        }
+    }
+    return n;
+}
+
+auto test_reinit_without_file_releases_handle(fs::path const& dir) -> void {
+    std::cout << "Testing re-initialising with file_output=false releases the old file...\n";
+    auto& log = Logger::getInstance();
+    auto const file = fs::canonical(dir) / "handle.jsonl";
+    log.initialize(jsonConfig(file));
+    check(log.writeRecord(LogLevel::INFO, R"({"a":1})") == RecordWrite::Written);
+    check(countOpenHandles(file) == 1);
+    auto cfg = jsonConfig(file);
+    cfg.file_output = false;
+    log.initialize(cfg);
+    check(countOpenHandles(file) == 0);
+    std::cout << "  ✓ passed\n";
+}
+
+auto test_failed_rename_truncates_live_file(fs::path const& dir) -> void {
+    std::cout << "Testing a failed rename truncates the live file...\n";
+    auto& log = Logger::getInstance();
+    auto const file = dir / "norename.jsonl";
+    // backup .1 is a non-empty directory: it can neither be removed nor renamed onto.
+    fs::create_directories(backup(file, 1));
+    std::ofstream(backup(file, 1) / "keep") << "x";
+    auto cfg = jsonConfig(file);
+    cfg.max_file_bytes = 60;
+    cfg.max_backup_files = 1;
+    log.initialize(cfg);
+    writeSeq(log, 1, 11);
+    check(fs::file_size(file) <= 60); // bounded, not growing past the bound
+    check(log.getSinkStats().rotations == 0); // no rotation succeeded
+    check(log.getSinkStats().failed > 0);
+    check(fs::exists(backup(file, 1) / "keep"));
+    std::cout << "  ✓ passed\n";
+}
+
+auto test_rotation_failure_counted_once(fs::path const& dir) -> void {
+    std::cout << "Testing a rotation failure is counted once...\n";
+    auto& log = Logger::getInstance();
+    auto const file = dir / "countonce.jsonl";
+    auto cfg = jsonConfig(file);
+    cfg.max_file_bytes = 60;
+    cfg.max_backup_files = 0; // rotation = truncate
+    log.initialize(cfg);
+    writeSeq(log, 1, 2);
+    fs::permissions(file, fs::perms::owner_read);
+    if (std::ofstream(file, std::ios::app).is_open()) {
+        std::cout << "  (skipped: file permissions are not enforced for this user)\n";
+        fs::permissions(file, fs::perms::owner_read | fs::perms::owner_write);
+        return;
+    }
+    // Truncate and reopen both fail, so the file ends closed and the write is refused.
+    check(log.writeRecord(LogLevel::INFO, seqLine(3)) == RecordWrite::SinkFailed);
+    check(log.getSinkStats().failed == 1);
+    check(log.getSinkStats().rotations == 0);
+    fs::permissions(file, fs::perms::owner_read | fs::perms::owner_write);
     std::cout << "  ✓ passed\n";
 }
 
@@ -536,6 +610,9 @@ auto main() -> int {
     test_file_output_false(dir);
     test_text_rotation_is_opt_in(dir);
     test_json_rotates_regardless_of_rotate_text(dir);
+    test_reinit_without_file_releases_handle(dir);
+    test_failed_rename_truncates_live_file(dir);
+    test_rotation_failure_counted_once(dir);
     test_old_defaults_unchanged(dir);
     test_level_changes_under_concurrent_logging(dir);
 

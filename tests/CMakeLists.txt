@@ -60,7 +60,6 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "Clang" AND TARGET build_logger_std_modules)
     target_compile_options(test_jsonl_sink PRIVATE
         ${LOGGER_STD_PCM_FLAGS}
         -fprebuilt-module-path=${LOGGER_STD_PCM_DIR}
-        -UNDEBUG
     )
     target_link_directories(test_jsonl_sink PRIVATE /usr/local/lib)
     target_link_libraries(test_jsonl_sink PRIVATE c++ c++abi)

@@ -2376,14 +2376,13 @@ class Logger::Impl {
             }
         }
 
-        errno = 0;
         auto mode = std::ios::app;
         if (format == LogFormat::JSON) {
             mode |= std::ios::binary;
         }
         log_file.open(log_path, mode);
         if (!log_file.is_open()) {
-            setError(std::error_code(errno != 0 ? errno : EIO, std::generic_category()));
+            setError(std::make_error_code(std::errc::io_error));
             file_size = 0;
             return false;
         }
@@ -2413,25 +2412,26 @@ class Logger::Impl {
     /// Writes `data` (already newline-terminated) as one write call, rotating first when it
     /// would pass the size bound and `may_rotate` is set. Requires mutex_ and an open file.
     [[nodiscard]] auto appendLocked(std::string_view data, bool may_rotate) -> bool {
+        auto rotation_failed = false;
         if (may_rotate && max_bytes != 0 && file_size > 0 && file_size + data.size() > max_bytes) {
-            if (!rotateLocked()) {
-                ++stats.failed;
-            }
+            rotation_failed = !rotateLocked();
             if (!log_file.is_open()) {
-                return false;
+                return false; // the caller counts this line as failed, which covers the rotation
             }
         }
-        errno = 0;
         log_file.write(data.data(), static_cast<std::streamsize>(data.size()));
         log_file.flush();
         if (!log_file) {
-            setError(std::error_code(errno != 0 ? errno : EIO, std::generic_category()));
+            setError(std::make_error_code(std::errc::io_error));
             log_file.close();
             log_file.clear();
             last_open_attempt = std::chrono::steady_clock::now();
             return false;
         }
         file_size += data.size();
+        if (rotation_failed) {
+            ++stats.failed; // counted once: only when the caller sees the line written
+        }
         return true;
     }
 
@@ -2465,11 +2465,19 @@ class Logger::Impl {
                 fail();
             }
             std::filesystem::rename(log_path, backupPath(1), ec);
+            auto const renamed = !ec || ec == std::errc::no_such_file_or_directory;
             fail();
+            if (!renamed) {
+                // The live file could not move: truncate it so it stays bounded instead of
+                // growing while the backups drain.
+                std::ofstream truncate(log_path, std::ios::trunc);
+            }
         }
-        ++stats.rotations;
         if (!openFileLocked()) {
             ok = false;
+        }
+        if (ok) {
+            ++stats.rotations;
         }
         return ok;
     }
@@ -2513,7 +2521,7 @@ class Logger::Impl {
     }
 
     std::atomic<LogLevel> current_level; // read without the mutex by log()/writeRecord()
-    bool console_enabled;
+    std::atomic<bool> console_enabled; // read after the lock is released by writeRecord's fallback
     bool console_color;
     bool initialized;
     LogFormat format{LogFormat::TEXT};
