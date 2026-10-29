@@ -53,7 +53,7 @@ auto enableColors(bool enable) -> Logger&;
 // Enable/disable console output (fluent API)
 auto setConsoleOutput(bool enable) -> Logger&;
 
-// Get current log level
+// Get current log level (setLevel() and getLevel() are safe against concurrent logging)
 [[nodiscard]] auto getLevel() const -> LogLevel;
 ```
 
@@ -98,9 +98,36 @@ auto critical(std::string_view template_str, TemplateParams const& params) -> vo
 // Flush log buffer to disk
 auto flush() -> void;
 
-// Rotate log file (future feature)
+// Rotate now: path -> path.1 -> ... -> path.N (oldest removed), then reopen.
+// With max_backup_files == 0 the file is truncated instead. Failures are counted, not thrown.
 auto rotate() -> void;
+
+// Counters since the last initialize()
+[[nodiscard]] auto getSinkStats() const -> SinkStats;
+[[nodiscard]] auto getTotalLogsWritten() const noexcept -> std::uint64_t;
+[[nodiscard]] auto getCurrentLogFileSize() const noexcept -> std::size_t;
 ```
+
+#### Record Writing (JSONL)
+
+```cpp
+// Write one caller-serialised record verbatim plus '\n'. Never throws.
+[[nodiscard]] auto writeRecord(LogLevel level, std::string_view line) noexcept -> RecordWrite;
+```
+
+Results:
+
+- `RecordWrite::Written`: the line reached the sink.
+- `RecordWrite::Filtered`: the level is below the minimum (counted in `SinkStats::filtered`).
+- `RecordWrite::Rejected`: the line contains `'\n'` (counted in `SinkStats::rejected`).
+- `RecordWrite::SinkFailed`: the file could not be opened, written or rotated. It is counted in
+  `SinkStats::failed`, `SinkStats::last_error` holds the `std::error_code` message (never record
+  content), and the line is written once to `std::cerr` if the console is off. The file is reopened
+  at most once per second after a failure.
+
+The logger does not serialise anything: the caller builds the JSON object. In `LogFormat::JSON` the
+text methods (`info()`, `warn()`, ...) are refused and counted in `SinkStats::rejected`, so the file
+stays pure JSONL.
 
 ### TemplateValue
 
@@ -135,10 +162,14 @@ enum class LogLevel : std::uint8_t {
 
 ```cpp
 enum class LogFormat {
-    TEXT,    // Human-readable (default, implemented)
-    JSON,    // JSON structured (future)
-    COMPACT  // Minimal format (future)
+    TEXT,    // Human-readable (default)
+    JSON,    // JSONL of caller-serialised records via writeRecord(); text methods refused
+    COMPACT  // Reserved, behaves as TEXT
 };
+
+enum class ConsoleStream : std::uint8_t { Stdout, Stderr };
+
+enum class RecordWrite : std::uint8_t { Written, Filtered, Rejected, SinkFailed };
 ```
 
 ## Structures
@@ -147,15 +178,67 @@ enum class LogFormat {
 
 ```cpp
 struct LoggerConfig {
-    std::string log_file_path{"logs/app.log"};
+    std::string log_file_path{"logs/bigbrother.log"};
     LogLevel min_level{LogLevel::INFO};
     LogFormat format{LogFormat::TEXT};
     bool console_output{true};
     bool console_color{true};
-    std::size_t max_file_size_mb{100};      // Future
-    std::size_t max_backup_files{5};        // Future
+    std::size_t max_file_size_mb{100};
+    std::size_t max_backup_files{5};
     bool async_logging{false};              // Future
+    std::uintmax_t max_file_bytes{0};       // 0: max_file_size_mb * 1 MiB
+    bool file_output{true};                 // false: no file is opened (console only)
+    ConsoleStream console_stream{ConsoleStream::Stdout};
+    bool announce_initialization{true};     // false: the "Logger initialized" line is not printed
 };
+```
+
+Every new field defaults to the previous behaviour: console on stdout, the announcement printed.
+A service whose stdout carries data sets `console_stream` to `ConsoleStream::Stderr` and
+`announce_initialization` to false.
+
+Rotation: when a write would push the file past `max_file_bytes` (or `max_file_size_mb`), the file
+becomes `path.1`, `path.1` becomes `path.2`, and so on up to `path.N` where N is `max_backup_files`;
+the oldest is removed. With N of 0 the file is truncated instead. The disk bound for one file set is
+`(N + 1)` times the size bound, plus one line. Rotation applies to text entries and to records.
+
+When a file is opened and its last byte is not `'\n'` (a torn last line after a crash), a newline is
+written first so the next record starts on its own line.
+
+### SinkStats
+
+```cpp
+struct SinkStats {
+    std::uint64_t written{0};
+    std::uint64_t filtered{0};
+    std::uint64_t rejected{0};   // text calls in JSON format, lines containing '\n'
+    std::uint64_t failed{0};     // file open/write/rotate failures
+    std::uint64_t rotations{0};
+    std::string last_error;      // std::error_code::message() of the last failure
+};
+```
+
+The counters restart at each `initialize()`. `getTotalLogsWritten()` equals `written`, and
+`getCurrentLogFileSize()` is the byte size of the open file.
+
+### JSONL Example
+
+```cpp
+import logger;
+
+logger::LoggerConfig config;
+config.log_file_path = "logs/events.jsonl";
+config.format = logger::LogFormat::JSON;
+config.console_output = false;
+config.max_file_bytes = 10 * 1024 * 1024;
+config.max_backup_files = 3;
+
+auto& log = logger::Logger::getInstance().initialize(config);
+auto const result = log.writeRecord(
+    logger::LogLevel::INFO, R"({"ts":"2026-10-29T10:00:00Z","level":"INFO","msg":"started"})");
+if (result == logger::RecordWrite::SinkFailed) {
+    // counted in log.getSinkStats().failed; log.getSinkStats().last_error says why
+}
 ```
 
 ## Type Aliases

@@ -10,6 +10,9 @@ A production-grade, thread-safe logging system with Mustache-style named templat
 - **C++23 Modules**: Modern module system with clean namespace separation
 - **ANSI Colors**: Color-coded console output (optional)
 - **Timezone-Aware**: ISO 8601 timestamps with UTC offset
+- **JSONL Records**: `LogFormat::JSON` writes caller-serialised records one per line, for machines and AI agents
+- **Real Rotation**: `max_file_bytes` and `max_backup_files` bound the disk used
+- **Console Stream**: `console_stream` sends console output to stdout (default) or stderr
 - **Zero Dependencies**: Self-contained, no external dependencies
 - **Smart Pointers**: RAII-compliant resource management
 
@@ -145,6 +148,27 @@ int main() {
 }
 ```
 
+### JSONL Records, Rotation and the Console Stream
+
+```cpp
+import logger;
+
+logger::LoggerConfig config;
+config.log_file_path = "logs/events.jsonl";
+config.format = logger::LogFormat::JSON;          // text methods are refused and counted
+config.console_stream = logger::ConsoleStream::Stderr;   // keep stdout free (default: Stdout)
+config.announce_initialization = false;           // no "Logger initialized" line (default: true)
+config.max_file_bytes = 10 * 1024 * 1024;         // rotate here (0: max_file_size_mb)
+config.max_backup_files = 3;                      // events.jsonl.1 .. .3; 0 truncates instead
+
+auto& log = logger::Logger::getInstance().initialize(config);
+auto const result = log.writeRecord(logger::LogLevel::INFO, R"({"msg":"started"})");
+```
+
+`writeRecord()` never throws and returns `RecordWrite::Written`, `Filtered`, `Rejected` (the line
+holds a newline) or `SinkFailed`. `getSinkStats()` reports the counters and the last error. Existing
+code that sets none of these options behaves exactly as before. See [docs/API.md](docs/API.md).
+
 ### Building from Source
 
 ```bash
@@ -215,6 +239,7 @@ The logger is fully thread-safe:
 - `Logger::processTemplate()` is static with no shared state
 - All logging methods are mutex-protected
 - Multiple threads can log concurrently without corruption
+- `setLevel()` / `getLevel()` are safe while other threads log (the level is atomic)
 - Zero contention for formatting operations
 
 ## Performance
@@ -238,6 +263,10 @@ cmake -B build -DBUILD_TESTS=ON
 cmake --build build
 ctest --test-dir build
 ```
+
+`tests/test_jsonl_sink.cpp` covers the JSONL sink, rotation, the console stream and the level race.
+It needs Clang and the std module PCM. To make its concurrency check detect a data race, configure
+with `-DCMAKE_CXX_FLAGS=-fsanitize=thread` and link with the same flag.
 
 ## License
 

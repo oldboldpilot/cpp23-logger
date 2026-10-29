@@ -51,6 +51,23 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "Clang" AND TARGET build_logger_std_modules)
     target_link_libraries(test_std_module PRIVATE c++ c++abi)
 
     add_test(NAME test_std_module COMMAND test_std_module)
+
+    # JSONL sink, rotation, console stream and the level race. It does `import std;`, so it
+    # needs the exact flags and BMI directory test_std_module uses (see the note above).
+    add_executable(test_jsonl_sink test_jsonl_sink.cpp)
+    target_link_libraries(test_jsonl_sink PRIVATE logger)
+    add_dependencies(test_jsonl_sink build_logger_std_modules)
+    target_compile_options(test_jsonl_sink PRIVATE
+        ${LOGGER_STD_PCM_FLAGS}
+        -fprebuilt-module-path=${LOGGER_STD_PCM_DIR}
+        -UNDEBUG
+    )
+    target_link_directories(test_jsonl_sink PRIVATE /usr/local/lib)
+    target_link_libraries(test_jsonl_sink PRIVATE c++ c++abi)
+    add_test(NAME test_jsonl_sink COMMAND test_jsonl_sink)
+    set_tests_properties(test_jsonl_sink PROPERTIES TIMEOUT 120)
+else()
+    message(STATUS "test_jsonl_sink not registered: it needs Clang and the std module PCM")
 endif()
 
 add_test(NAME test_logger COMMAND test_logger)

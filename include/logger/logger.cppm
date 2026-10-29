@@ -267,21 +267,45 @@ enum class LogLevel : std::uint8_t {
  *         Best for: Console output, manual log inspection
  *         Example: [2025-11-18 14:23:45.123 -05:00] [INFO] Application started
  *
- * - JSON: Structured JSON format for machine parsing
- *         Best for: Log aggregation systems (ELK, Splunk), analytics
- *         Example: {"timestamp":"2025-11-18T14:23:45.123-05:00","level":"INFO","message":"..."}
+ * - JSON: JSONL, one caller-serialised JSON object per line
+ *         Best for: AI agents, log aggregation systems (ELK, Splunk), analytics
+ *         Records are written verbatim by Logger::writeRecord(); the logger does not
+ *         serialise anything. The text methods (info(), warn(), ...) are REFUSED and
+ *         counted in SinkStats::rejected, so the file stays pure JSONL.
+ *         Example: {"ts":"2025-11-18T14:23:45.123-05:00","level":"INFO","msg":"..."}
  *
  * - COMPACT: Minimal format with reduced whitespace
  *            Best for: High-volume logging, bandwidth-constrained environments
  *            Example: 2025-11-18T14:23:45.123-05:00|INFO|App started
  *
- * NOTE: TEXT format is currently implemented. JSON and COMPACT are reserved
- *       for future enhancement.
+ * NOTE: TEXT and JSON are implemented. COMPACT is reserved and currently behaves as TEXT.
  */
 enum class LogFormat {
     TEXT,   // Human-readable text format (default, implemented)
-    JSON,   // JSON structured logging (future)
-    COMPACT // Minimal text format (future)
+    JSON,   // JSONL of caller-serialised records via writeRecord(); text methods refused
+    COMPACT // Minimal text format (reserved, behaves as TEXT)
+};
+
+/// Which standard stream console output goes to. Stdout is the historical default.
+enum class ConsoleStream : std::uint8_t { Stdout, Stderr };
+
+/// Outcome of Logger::writeRecord(). Never thrown: a sink failure is a value.
+enum class RecordWrite : std::uint8_t {
+    Written,   // the line reached the sink (file and/or console)
+    Filtered,  // below the minimum level
+    Rejected,  // the line contains '\n' (it would break one-record-per-line)
+    SinkFailed // the file could not be opened, written or rotated
+};
+
+/// Counters since the last initialize(). last_error is std::error_code::message() of the
+/// last failure; it never contains record content.
+struct SinkStats {
+    std::uint64_t written{0};
+    std::uint64_t filtered{0};
+    std::uint64_t rejected{0}; // text calls in JSON format, lines containing '\n'
+    std::uint64_t failed{0};   // file open/write/rotate failures
+    std::uint64_t rotations{0};
+    std::string last_error;
 };
 
 /**
@@ -304,7 +328,7 @@ enum class LogFormat {
  *
  * - format: Log entry format (TEXT, JSON, or COMPACT)
  *           Default: LogFormat::TEXT
- *           Note: Only TEXT is currently implemented
+ *           Note: TEXT and JSON are implemented; COMPACT behaves as TEXT
  *
  * - console_output: Enable/disable console output
  *                   Default: true
@@ -316,11 +340,25 @@ enum class LogFormat {
  *
  * - max_file_size_mb: Maximum log file size before rotation (in megabytes)
  *                     Default: 100 MB
- *                     Note: Not yet implemented (future feature)
+ *                     Ignored when max_file_bytes is non-zero
  *
- * - max_backup_files: Number of rotated log files to keep
+ * - max_file_bytes: Maximum log file size before rotation, in bytes
+ *                   Default: 0 (use max_file_size_mb)
+ *
+ * - max_backup_files: Number of rotated log files to keep (path.1 .. path.N)
  *                     Default: 5
- *                     Note: Not yet implemented (future feature)
+ *                     0 means rotation truncates the file instead of keeping a backup
+ *                     Disk bound per file set: (N+1) x the size bound, plus one line
+ *
+ * - file_output: Open a log file at all
+ *                Default: true
+ *                false: console only, nothing is opened or created
+ *
+ * - console_stream: Stream console output goes to (ConsoleStream::Stdout or Stderr)
+ *                   Default: Stdout. Use Stderr so stdout stays free for program output
+ *
+ * - announce_initialization: Print the "Logger initialized" line
+ *                            Default: true. false prints nothing
  *
  * - async_logging: Enable asynchronous logging (background thread)
  *                  Default: false (synchronous)
@@ -347,6 +385,10 @@ struct LoggerConfig {
     std::size_t max_file_size_mb{100};
     std::size_t max_backup_files{5};
     bool async_logging{false};
+    std::uintmax_t max_file_bytes{0};
+    bool file_output{true};
+    ConsoleStream console_stream{ConsoleStream::Stdout};
+    bool announce_initialization{true};
 };
 
 /**
@@ -460,8 +502,23 @@ class Logger {
     [[nodiscard]] auto getLevel() const -> LogLevel;
 
     /**
-     * Get logger statistics
+     * Write one caller-serialised record verbatim, followed by '\n'.
+     *
+     * Intended for LogFormat::JSON (JSONL) but usable in any format. Never throws:
+     * - below the minimum level          -> Filtered
+     * - `line` contains '\n'             -> Rejected
+     * - file/rotation failure            -> SinkFailed (counted, last_error set, the line is
+     *                                       written to std::cerr once if the console is off;
+     *                                       the file is reopened at most once per second)
+     * - otherwise                        -> Written
+     * The file is rotated first when the line would push it past the size bound.
      */
+    [[nodiscard]] auto writeRecord(LogLevel level, std::string_view line) noexcept -> RecordWrite;
+
+    /**
+     * Get logger statistics (counters reset by initialize())
+     */
+    [[nodiscard]] auto getSinkStats() const -> SinkStats;
     [[nodiscard]] auto getTotalLogsWritten() const noexcept -> std::uint64_t;
     [[nodiscard]] auto getCurrentLogFileSize() const noexcept -> std::size_t;
 
@@ -1831,7 +1888,9 @@ class Logger {
     auto flush() -> void;
 
     /**
-     * Rotate log file immediately
+     * Rotate log file immediately: path -> path.1 -> ... -> path.N (the oldest is removed),
+     * then reopen. With max_backup_files == 0 the file is truncated instead.
+     * Uses only the error_code filesystem overloads; failures are counted, not thrown.
      */
     auto rotate() -> void;
 
@@ -2017,47 +2076,63 @@ class Logger::Impl {
         }
     }
 
-    auto initialize(std::string const& log_file_path, LogLevel level, bool console,
-                    bool color = true) -> void {
+    auto initialize(LoggerConfig const& config) -> void {
         std::lock_guard<std::mutex> lock(mutex_);
 
-        current_level = level;
-        console_enabled = console;
-        console_color = color;
+        // Close an open file BEFORE reopening: a second initialize() used to leak the
+        // first handle's state and append to whatever the stream still pointed at.
+        log_file.close();
+        log_file.clear();
 
-        // Create log directory if it doesn't exist. Skip when the path has no
-        // directory component: parent_path() is "" for a bare filename like
-        // "app.log", and create_directories("") throws "No such file or
-        // directory". Use the error_code overload so a real failure is reported
-        // rather than thrown out of init().
-        std::filesystem::path log_path(log_file_path);
-        if (auto const parent = log_path.parent_path(); !parent.empty()) {
-            std::error_code ec;
-            std::filesystem::create_directories(parent, ec);
-            if (ec) {
-                std::cerr << "Failed to create log directory '" << parent.string()
-                          << "': " << ec.message() << std::endl;
+        current_level = config.min_level;
+        console_enabled = config.console_output;
+        console_color = config.console_color;
+        format = config.format;
+        console_stream = config.console_stream;
+        file_output = config.file_output;
+        max_backups = config.max_backup_files;
+        max_bytes = config.max_file_bytes != 0
+                        ? config.max_file_bytes
+                        : static_cast<std::uintmax_t>(config.max_file_size_mb) * 1024U * 1024U;
+        log_path = config.log_file_path;
+        file_size = 0;
+        stats = SinkStats{};
+        written = 0;
+        last_open_attempt = std::chrono::steady_clock::now();
+
+        if (file_output) {
+            // Create log directory if it doesn't exist. Skip when the path has no
+            // directory component: parent_path() is "" for a bare filename like
+            // "app.log", and create_directories("") throws "No such file or
+            // directory". Use the error_code overload so a real failure is reported
+            // rather than thrown out of init().
+            if (auto const parent = std::filesystem::path(log_path).parent_path();
+                !parent.empty()) {
+                std::error_code ec;
+                std::filesystem::create_directories(parent, ec);
+                if (ec) {
+                    std::cerr << "Failed to create log directory '" << parent.string()
+                              << "': " << ec.message() << std::endl;
+                    stats.last_error = ec.message();
+                }
+            }
+            if (!openFileLocked()) {
+                ++stats.failed;
+                std::cerr << "Failed to open log file: " << log_path << std::endl;
             }
         }
 
-        // Open log file with UTF-8 encoding
-        log_file.open(log_file_path, std::ios::app);
-        if (log_file.is_open()) {
-            log_file.imbue(std::locale());
-        }
-
-        if (!log_file.is_open()) {
-            std::cerr << "Failed to open log file: " << log_file_path << std::endl;
-        } else {
-            initialized = true;
-            std::cout << "Logger initialized: " << log_file_path
-                      << " (UTF-8, Color: " << (console_color ? "ON" : "OFF") << ")" << std::endl;
+        initialized = !file_output || log_file.is_open();
+        if (initialized && config.announce_initialization) {
+            consoleStream() << "Logger initialized: "
+                            << (file_output ? log_path : std::string("(console only)"))
+                            << " (UTF-8, Color: " << (console_color ? "ON" : "OFF") << ")"
+                            << std::endl;
         }
     }
 
     auto setLevel(LogLevel level) -> void {
-        std::lock_guard<std::mutex> lock(mutex_);
-        current_level = level;
+        current_level.store(level);
     }
 
     auto enableColors(bool enable) -> void {
@@ -2071,17 +2146,91 @@ class Logger::Impl {
     }
 
     [[nodiscard]] auto getLevel() const -> LogLevel {
+        return current_level.load();
+    }
+
+    [[nodiscard]] auto writeRecord(LogLevel level, std::string_view line) noexcept
+        -> RecordWrite {
+        try {
+            if (level < current_level.load()) {
+                std::lock_guard<std::mutex> lock(mutex_);
+                ++stats.filtered;
+                return RecordWrite::Filtered;
+            }
+            if (line.find('\n') != std::string_view::npos) {
+                std::lock_guard<std::mutex> lock(mutex_);
+                ++stats.rejected;
+                return RecordWrite::Rejected;
+            }
+
+            std::string entry;
+            entry.reserve(line.size() + 1);
+            entry.append(line);
+            entry.push_back('\n');
+
+            std::lock_guard<std::mutex> lock(mutex_);
+            auto const ok = !file_output || (ensureOpenLocked() && appendLocked(entry));
+            if (console_enabled) {
+                consoleStream() << entry << std::flush;
+            }
+            if (ok) {
+                ++written;
+                return RecordWrite::Written;
+            }
+            ++stats.failed;
+            if (!console_enabled) {
+                std::cerr << entry << std::flush; // the one fallback copy
+            }
+            return RecordWrite::SinkFailed;
+        } catch (std::system_error const& e) {
+            noteFailureNoexcept(e.code().message());
+        } catch (...) {
+            noteFailureNoexcept("unexpected exception");
+        }
+        // Only reached after an exception: the lock is released, the line still goes out once.
+        try {
+            if (!console_enabled) {
+                std::cerr << line << '\n' << std::flush;
+            }
+        } catch (...) {
+        }
+        return RecordWrite::SinkFailed;
+    }
+
+    auto rotate() -> void {
         std::lock_guard<std::mutex> lock(mutex_);
-        return current_level;
+        if (file_output && !rotateLocked()) {
+            ++stats.failed;
+        }
+    }
+
+    [[nodiscard]] auto sinkStats() const -> SinkStats {
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto copy = stats;
+        copy.written = written.load();
+        return copy;
+    }
+
+    [[nodiscard]] auto totalLogsWritten() const noexcept -> std::uint64_t {
+        return written.load();
+    }
+
+    [[nodiscard]] auto currentFileSize() const noexcept -> std::size_t {
+        return static_cast<std::size_t>(file_size.load());
     }
 
     auto log(LogLevel level, std::string const& msg, std::source_location const& loc) -> void {
-        if (level < current_level) {
+        if (level < current_level.load()) {
             return; // Skip if level is below threshold
         }
 
         std::lock_guard<std::mutex> lock(
             mutex_); // Thread-safe logging (protects concurrent pipelines)
+
+        if (format == LogFormat::JSON) {
+            ++stats.rejected; // text calls would corrupt the JSONL file; use writeRecord()
+            return;
+        }
 
         // ========================================================================
         // Timestamp Formatting with Date, Time, Milliseconds, and Timezone
@@ -2154,17 +2303,20 @@ class Logger::Impl {
                            << levelToString(level) << "] " << AnsiColors::RESET
                            << AnsiColors::BRIGHT_BLACK << "[" << loc.file_name() << ":"
                            << loc.line() << "] " << AnsiColors::RESET << msg << std::endl;
-                std::cout << console_ss.str();
+                consoleStream() << console_ss.str();
             } else {
                 // No colors - use plain text format (same as file)
-                std::cout << file_entry;
+                consoleStream() << file_entry;
             }
         }
 
         // Output to file (no colors)
-        if (log_file.is_open()) {
-            log_file << file_entry;
-            log_file.flush(); // Ensure immediate write
+        if (!file_output) {
+            ++written;
+        } else if (ensureOpenLocked() && appendLocked(file_entry)) {
+            ++written;
+        } else {
+            ++stats.failed;
         }
     }
 
@@ -2176,6 +2328,146 @@ class Logger::Impl {
     }
 
   private:
+    [[nodiscard]] auto consoleStream() const -> std::ostream& {
+        return console_stream == ConsoleStream::Stderr ? std::cerr : std::cout;
+    }
+
+    [[nodiscard]] auto backupPath(std::size_t index) const -> std::string {
+        return log_path + "." + std::to_string(index);
+    }
+
+    auto setError(std::error_code ec) -> void {
+        stats.last_error = ec.message();
+    }
+
+    auto noteFailureNoexcept(std::string_view message) noexcept -> void {
+        try {
+            std::lock_guard<std::mutex> lock(mutex_);
+            ++stats.failed;
+            stats.last_error = message;
+        } catch (...) {
+        }
+    }
+
+    /// (Re)opens the log file for appending. Requires mutex_. Repairs a torn last line
+    /// (a file whose last byte is not '\n', e.g. after a crash) by terminating it first.
+    [[nodiscard]] auto openFileLocked() -> bool {
+        log_file.close();
+        log_file.clear();
+
+        std::error_code ec;
+        auto size = std::filesystem::file_size(log_path, ec);
+        if (ec) {
+            size = 0; // does not exist yet
+        }
+        auto torn = false;
+        if (size > 0) {
+            std::ifstream probe(log_path, std::ios::binary);
+            probe.seekg(-1, std::ios::end);
+            char last = '\n';
+            if (probe.get(last)) {
+                torn = last != '\n';
+            }
+        }
+
+        errno = 0;
+        auto mode = std::ios::app;
+        if (format == LogFormat::JSON) {
+            mode |= std::ios::binary;
+        }
+        log_file.open(log_path, mode);
+        if (!log_file.is_open()) {
+            setError(std::error_code(errno != 0 ? errno : EIO, std::generic_category()));
+            file_size = 0;
+            return false;
+        }
+        log_file.imbue(std::locale());
+        if (torn) {
+            log_file.put('\n');
+            log_file.flush();
+            ++size;
+        }
+        file_size = size;
+        return true;
+    }
+
+    /// Reopens a closed file, at most once per second. Requires mutex_.
+    [[nodiscard]] auto ensureOpenLocked() -> bool {
+        if (log_file.is_open()) {
+            return true;
+        }
+        auto const now = std::chrono::steady_clock::now();
+        if (now - last_open_attempt < std::chrono::seconds(1)) {
+            return false;
+        }
+        last_open_attempt = now;
+        return openFileLocked();
+    }
+
+    /// Writes `data` (already newline-terminated) as one write call, rotating first when it
+    /// would pass the size bound. Requires mutex_ and an open file.
+    [[nodiscard]] auto appendLocked(std::string_view data) -> bool {
+        if (max_bytes != 0 && file_size > 0 && file_size + data.size() > max_bytes) {
+            if (!rotateLocked()) {
+                ++stats.failed;
+            }
+            if (!log_file.is_open()) {
+                return false;
+            }
+        }
+        errno = 0;
+        log_file.write(data.data(), static_cast<std::streamsize>(data.size()));
+        log_file.flush();
+        if (!log_file) {
+            setError(std::error_code(errno != 0 ? errno : EIO, std::generic_category()));
+            log_file.close();
+            log_file.clear();
+            last_open_attempt = std::chrono::steady_clock::now();
+            return false;
+        }
+        file_size += data.size();
+        return true;
+    }
+
+    /// path -> path.1 -> ... -> path.N, oldest removed, then reopen; N == 0 truncates.
+    /// Requires mutex_. Every filesystem call uses the error_code overload.
+    [[nodiscard]] auto rotateLocked() -> bool {
+        log_file.close();
+        log_file.clear();
+
+        auto ok = true;
+        std::error_code ec;
+        auto const fail = [&] {
+            if (ec && ec != std::errc::no_such_file_or_directory) {
+                setError(ec);
+                ok = false;
+            }
+            ec.clear();
+        };
+
+        if (max_backups == 0) {
+            std::ofstream truncate(log_path, std::ios::trunc);
+            if (!truncate) {
+                setError(std::make_error_code(std::errc::io_error));
+                ok = false;
+            }
+        } else {
+            std::filesystem::remove(backupPath(max_backups), ec);
+            fail();
+            for (auto i = max_backups - 1; i >= 1; --i) {
+                std::filesystem::rename(backupPath(i), backupPath(i + 1), ec);
+                fail();
+            }
+            std::filesystem::rename(log_path, backupPath(1), ec);
+            fail();
+        }
+        ++stats.rotations;
+        if (!openFileLocked()) {
+            ok = false;
+        }
+        return ok;
+    }
+
     [[nodiscard]] static auto levelToString(LogLevel level) -> std::string {
         switch (level) {
             case LogLevel::TRACE:
@@ -2214,10 +2506,20 @@ class Logger::Impl {
         }
     }
 
-    LogLevel current_level;
+    std::atomic<LogLevel> current_level; // read without the mutex by log()/writeRecord()
     bool console_enabled;
     bool console_color;
     bool initialized;
+    LogFormat format{LogFormat::TEXT};
+    ConsoleStream console_stream{ConsoleStream::Stdout};
+    bool file_output{false}; // false until initialize(): an uninitialised logger is console-only
+    std::string log_path;
+    std::uintmax_t max_bytes{0};
+    std::size_t max_backups{0};
+    std::atomic<std::uintmax_t> file_size{0}; // written under mutex_, read lock-free
+    std::atomic<std::uint64_t> written{0};
+    SinkStats stats;
+    std::chrono::steady_clock::time_point last_open_attempt{};
     std::ofstream log_file;
     mutable std::mutex mutex_; // Thread-safety (mutable for const methods)
 };
@@ -2238,15 +2540,38 @@ Logger::~Logger() {
 }
 
 auto Logger::initialize(LoggerConfig const& config) -> Logger& {
-    pImpl->initialize(config.log_file_path, config.min_level, config.console_output,
-                      config.console_color);
+    pImpl->initialize(config);
     return *this;
 }
 
 auto Logger::initialize(std::string const& log_file_path, LogLevel level, bool console_output)
     -> Logger& {
-    pImpl->initialize(log_file_path, level, console_output, true); // Color enabled by default
+    // Color enabled by default; every other field keeps its LoggerConfig default.
+    pImpl->initialize(LoggerConfig{.log_file_path = log_file_path,
+                                   .min_level = level,
+                                   .console_output = console_output});
     return *this;
+}
+
+[[nodiscard]] auto Logger::writeRecord(LogLevel level, std::string_view line) noexcept
+    -> RecordWrite {
+    return pImpl->writeRecord(level, line);
+}
+
+[[nodiscard]] auto Logger::getSinkStats() const -> SinkStats {
+    return pImpl->sinkStats();
+}
+
+[[nodiscard]] auto Logger::getTotalLogsWritten() const noexcept -> std::uint64_t {
+    return pImpl->totalLogsWritten();
+}
+
+[[nodiscard]] auto Logger::getCurrentLogFileSize() const noexcept -> std::size_t {
+    return pImpl->currentFileSize();
+}
+
+auto Logger::rotate() -> void {
+    pImpl->rotate();
 }
 
 auto Logger::setLevel(LogLevel level) -> Logger& {
