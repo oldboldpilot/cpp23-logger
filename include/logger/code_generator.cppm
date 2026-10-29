@@ -115,6 +115,7 @@ module;
 
 #include <algorithm>
 #include <cctype>
+#include <cstdint>
 #include <functional>
 #include <map>
 #include <memory>
@@ -391,18 +392,21 @@ using TemplateArray = std::vector<TemplateValue>;
 using TemplateObject = std::map<std::string, TemplateValue>;
 
 /**
- * Template value variant - can hold string, bool, int, double, array, or object
+ * Template value variant - can hold string, bool, int64_t, double, array, or object
  */
 class TemplateValue {
   public:
-    using ValueType = std::variant<std::string, bool, int, double, TemplateArray, TemplateObject>;
+    using ValueType =
+        std::variant<std::string, bool, std::int64_t, double, TemplateArray, TemplateObject>;
 
     // Constructors for each type
     TemplateValue() : value_{std::string{}} {}
     TemplateValue(std::string s) : value_{std::move(s)} {}
     TemplateValue(char const* s) : value_{std::string{s}} {}
     TemplateValue(bool b) : value_{b} {}
-    TemplateValue(int i) : value_{i} {}
+    TemplateValue(int i) : value_{static_cast<std::int64_t>(i)} {}
+    TemplateValue(std::int64_t i) : value_{i} {}
+    TemplateValue(std::size_t u) : value_{static_cast<std::int64_t>(u)} {}
     TemplateValue(double d) : value_{d} {}
     TemplateValue(TemplateArray arr) : value_{std::move(arr)} {}
     TemplateValue(TemplateObject obj) : value_{std::move(obj)} {}
@@ -412,7 +416,9 @@ class TemplateValue {
         return std::holds_alternative<std::string>(value_);
     }
     [[nodiscard]] auto isBool() const -> bool { return std::holds_alternative<bool>(value_); }
-    [[nodiscard]] auto isInt() const -> bool { return std::holds_alternative<int>(value_); }
+    [[nodiscard]] auto isInt() const -> bool {
+        return std::holds_alternative<std::int64_t>(value_);
+    }
     [[nodiscard]] auto isDouble() const -> bool { return std::holds_alternative<double>(value_); }
     [[nodiscard]] auto isArray() const -> bool {
         return std::holds_alternative<TemplateArray>(value_);
@@ -430,7 +436,8 @@ class TemplateValue {
                     return arg;
                 } else if constexpr (std::is_same_v<T, bool>) {
                     return arg ? "true" : "false";
-                } else if constexpr (std::is_same_v<T, int> || std::is_same_v<T, double>) {
+                } else if constexpr (std::is_same_v<T, std::int64_t> ||
+                                     std::is_same_v<T, double>) {
                     return std::to_string(arg);
                 } else {
                     return "";
@@ -443,9 +450,13 @@ class TemplateValue {
         if (isBool())
             return std::get<bool>(value_);
         if (isInt())
-            return std::get<int>(value_) != 0;
+            return std::get<std::int64_t>(value_) != 0;
+        if (isDouble())
+            return std::get<double>(value_) != 0.0;
         if (isString())
             return !std::get<std::string>(value_).empty();
+        if (isArray())
+            return !std::get<TemplateArray>(value_).empty();
         return false;
     }
 
@@ -459,6 +470,16 @@ class TemplateValue {
 
     // Nested access with dot notation
     [[nodiscard]] auto getProperty(std::string_view path) const -> TemplateValue {
+        if (path == ".") {
+            if (isObject()) {
+                auto const& obj = asObject();
+                auto it = obj.find(".");
+                if (it != obj.end()) {
+                    return it->second;
+                }
+            }
+            return TemplateValue{};
+        }
         auto dot_pos = path.find('.');
 
         if (dot_pos == std::string_view::npos) {
@@ -493,6 +514,90 @@ class TemplateValue {
 };
 
 /**
+ * Convert string to valid C/C++/CUDA/GLSL/Python identifier (replaces non-alnum with '_')
+ */
+[[nodiscard]] inline auto toCIdentifier(std::string_view str) -> std::string {
+    std::string result;
+    result.reserve(str.size());
+    for (char c : str) {
+        if (std::isalnum(static_cast<unsigned char>(c)) != 0 || c == '_') {
+            result += c;
+        } else {
+            result += '_';
+        }
+    }
+    if (!result.empty() && (std::isdigit(static_cast<unsigned char>(result[0])) != 0)) {
+        result.insert(result.begin(), '_');
+    }
+    return result;
+}
+
+/**
+ * Create Doxygen / JSDoc block comment
+ */
+[[nodiscard]] inline auto docComment(std::string_view str) -> std::string {
+    return "/** " + std::string(str) + " */";
+}
+
+/**
+ * Pad string on the left to target width
+ */
+[[nodiscard]] inline auto padLeft(std::string_view str, int width, char pad_char = ' ')
+    -> std::string {
+    if (width <= 0 || static_cast<int>(str.size()) >= width) {
+        return std::string(str);
+    }
+    return std::string(static_cast<std::size_t>(width) - str.size(), pad_char) + std::string(str);
+}
+
+/**
+ * Pad string on the right to target width
+ */
+[[nodiscard]] inline auto padRight(std::string_view str, int width, char pad_char = ' ')
+    -> std::string {
+    if (width <= 0 || static_cast<int>(str.size()) >= width) {
+        return std::string(str);
+    }
+    return std::string(str) + std::string(static_cast<std::size_t>(width) - str.size(), pad_char);
+}
+
+/**
+ * Prefix declaration with C++23 / CUDA cache-line alignment specifier
+ */
+[[nodiscard]] inline auto alignAs(std::string_view str, int alignment = 64) -> std::string {
+    return "alignas(" + std::to_string(alignment > 0 ? alignment : 64) + ") " + std::string(str);
+}
+
+/**
+ * Prefix kernel name/signature with CUDA extern "C" __global__ qualifier
+ */
+[[nodiscard]] inline auto cudaGlobal(std::string_view str) -> std::string {
+    return "extern \"C\" __global__ void " + std::string(str);
+}
+
+/**
+ * Prefix device helper with __device__ __forceinline__
+ */
+[[nodiscard]] inline auto cudaDeviceInline(std::string_view str) -> std::string {
+    return "__device__ __forceinline__ " + std::string(str);
+}
+
+/**
+ * Prefix function with AVX-512 multi-register SIMD target attribute
+ */
+[[nodiscard]] inline auto simdAvx512Attr(std::string_view str) -> std::string {
+    return "__attribute__((target(\"avx512f,avx512bw,avx512vl,avx512vnni,avx512bf16,fma\"))) " +
+           std::string(str);
+}
+
+/**
+ * Prefix function with AVX2 + FMA target attribute
+ */
+[[nodiscard]] inline auto simdAvx2Attr(std::string_view str) -> std::string {
+    return "__attribute__((target(\"avx2,fma,f16c\"))) " + std::string(str);
+}
+
+/**
  * ============================================================================
  * Filter Registry - Manages transformation functions
  * ============================================================================
@@ -505,21 +610,34 @@ class FilterRegistry {
     FilterRegistry() {
         // Register built-in filters
         registerFilter("uppercase", toUpperCase);
+        registerFilter("upper", toUpperCase);
         registerFilter("lowercase", toLowerCase);
+        registerFilter("lower", toLowerCase);
         registerFilter("camelCase", toCamelCase);
         registerFilter("PascalCase", toPascalCase);
         registerFilter("snake_case", toSnakeCase);
         registerFilter("kebab-case", toKebabCase);
         registerFilter("SCREAMING_SNAKE_CASE", toScreamingSnakeCase);
+        registerFilter("SCREAMING_SNAKE", toScreamingSnakeCase);
+        registerFilter("c_ident", toCIdentifier);
         registerFilter("trim", trim);
         registerFilter("escape", escape);
         registerFilter("quote", quote);
         registerFilter("cpp_comment", cppComment);
+        registerFilter("glsl_comment", cppComment);
         registerFilter("c_comment", cComment);
         registerFilter("py_comment", pythonComment);
+        registerFilter("doc_comment", docComment);
+        registerFilter("align64", [](std::string_view s) -> std::string { return alignAs(s, 64); });
+        registerFilter("cuda_global", cudaGlobal);
+        registerFilter("cuda_device_inline", cudaDeviceInline);
+        registerFilter("simd_avx512_attr", simdAvx512Attr);
+        registerFilter("simd_avx2_attr", simdAvx2Attr);
 
-        // Parameterized filters (use closures)
+        // Parameterized shorthand filters
+        registerFilter("indent2", [](std::string_view s) -> std::string { return indent(s, 2); });
         registerFilter("indent4", [](std::string_view s) -> std::string { return indent(s, 4); });
+        registerFilter("indent6", [](std::string_view s) -> std::string { return indent(s, 6); });
         registerFilter("indent8", [](std::string_view s) -> std::string { return indent(s, 8); });
         registerFilter("wrap80", [](std::string_view s) -> std::string { return wrap(s, 80); });
         registerFilter("wrap120", [](std::string_view s) -> std::string { return wrap(s, 120); });
@@ -529,12 +647,58 @@ class FilterRegistry {
         filters_[std::move(name)] = std::move(filter);
     }
 
-    [[nodiscard]] auto applyFilter(std::string_view filter_name, std::string_view value) const
+    [[nodiscard]] auto applyFilter(std::string_view filter_spec, std::string_view value) const
         -> std::string {
-        auto it = filters_.find(std::string(filter_name));
+        auto trimmed_spec = trim(filter_spec);
+        auto it = filters_.find(trimmed_spec);
         if (it != filters_.end()) {
             return it->second(value);
         }
+
+        // Check parameterized filters: "indent 4", "wrap 80", "pad_left 12",
+        // "pad_right 12", "align_as 64", "default fallback", "prefix pre_", "suffix _t"
+        auto space_pos = trimmed_spec.find(' ');
+        if (space_pos != std::string_view::npos) {
+            auto fname = trim(trimmed_spec.substr(0, space_pos));
+            auto farg = trim(trimmed_spec.substr(space_pos + 1));
+            if (farg.size() >= 2 &&
+                ((farg.front() == '"' && farg.back() == '"') ||
+                 (farg.front() == '\'' && farg.back() == '\''))) {
+                farg = farg.substr(1, farg.size() - 2);
+            }
+            auto parse_int = [](std::string const& s, int fallback) -> int {
+                try {
+                    return std::stoi(s);
+                } catch (...) {
+                    return fallback;
+                }
+            };
+            if (fname == "indent") {
+                return indent(value, parse_int(farg, 4));
+            }
+            if (fname == "wrap") {
+                return wrap(value, parse_int(farg, 80));
+            }
+            if (fname == "pad_left") {
+                return padLeft(value, parse_int(farg, 8));
+            }
+            if (fname == "pad_right") {
+                return padRight(value, parse_int(farg, 8));
+            }
+            if (fname == "align_as") {
+                return alignAs(value, parse_int(farg, 64));
+            }
+            if (fname == "default") {
+                return value.empty() ? farg : std::string(value);
+            }
+            if (fname == "prefix") {
+                return farg + std::string(value);
+            }
+            if (fname == "suffix") {
+                return std::string(value) + farg;
+            }
+        }
+
         return std::string(value); // Unknown filter - return unchanged
     }
 
@@ -556,105 +720,176 @@ class CodeGenerator {
   public:
     CodeGenerator() : filters_{std::make_shared<FilterRegistry>()} {}
 
-    /**
-     * Register custom filter (fluent API - returns reference for chaining)
-     *
-     * @param name Filter name (e.g., "reverse", "first5")
-     * @param filter Transformation function
-     * @return Reference to this CodeGenerator (for method chaining)
-     *
-     * Example:
-     *   gen.registerFilter("reverse", reverseFunc)
-     *      .registerFilter("upper", upperFunc)
-     *      .render(template, data);
-     */
     auto registerFilter(std::string name, FilterFunction filter) -> CodeGenerator& {
         filters_->registerFilter(std::move(name), std::move(filter));
         return *this;
     }
 
-    /**
-     * Set template string (fluent API)
-     *
-     * @param template_str Template string with {{placeholders}}
-     * @return Reference to this CodeGenerator (for method chaining)
-     *
-     * Example:
-     *   gen.setTemplate("class {{name | PascalCase}}")
-     *      .setData({{"name", "user"}})
-     *      .render();
-     */
+    auto registerPartial(std::string name, std::string partial_template) -> CodeGenerator& {
+        partials_[std::move(name)] = std::move(partial_template);
+        return *this;
+    }
+
     auto setTemplate(std::string template_str) -> CodeGenerator& {
         template_ = std::move(template_str);
         return *this;
     }
 
-    /**
-     * Set data for rendering (fluent API)
-     *
-     * @param data Template data object
-     * @return Reference to this CodeGenerator (for method chaining)
-     */
     auto setData(TemplateObject data) -> CodeGenerator& {
         data_ = std::move(data);
         return *this;
     }
 
-    /**
-     * Add data field (fluent API - incremental data building)
-     *
-     * @param key Field name
-     * @param value Field value
-     * @return Reference to this CodeGenerator (for method chaining)
-     *
-     * Example:
-     *   gen.addData("name", "User")
-     *      .addData("id", 123)
-     *      .render(template);
-     */
     auto addData(std::string key, TemplateValue value) -> CodeGenerator& {
         data_[std::move(key)] = std::move(value);
         return *this;
     }
 
-    /**
-     * Render template with data (fluent API - uses stored template and data)
-     *
-     * @return Rendered string
-     *
-     * Example:
-     *   auto result = gen.setTemplate(tmpl)
-     *                    .setData(data)
-     *                    .render();
-     */
     [[nodiscard]] auto render() const -> std::string { return processTemplate(template_, data_); }
 
-    /**
-     * Render template with provided data (classic API - stateless)
-     *
-     * @param template_str Template string
-     * @param data Template data
-     * @return Rendered string
-     */
     [[nodiscard]] auto render(std::string_view template_str, TemplateObject const& data) const
         -> std::string {
         return processTemplate(template_str, data);
     }
 
-    /**
-     * Reset generator state (fluent API)
-     *
-     * @return Reference to this CodeGenerator (for method chaining)
-     */
     auto reset() -> CodeGenerator& {
         template_.clear();
         data_.clear();
+        partials_.clear();
         return *this;
     }
 
   private:
     /**
-     * Process template with full feature support including sections
+     * Find the matching closing tag for a section while respecting nested sections of the same kind.
+     */
+    [[nodiscard]] static auto findMatchingSectionEnd(std::string_view text,
+                                                     std::size_t search_from,
+                                                     std::string_view kind,
+                                                     std::string_view end_tag) -> std::size_t {
+        int depth = 1;
+        std::size_t pos = search_from;
+        while (pos < text.size()) {
+            auto next_open = text.find("{{", pos);
+            if (next_open == std::string_view::npos) {
+                return std::string_view::npos;
+            }
+            if (text.substr(next_open).starts_with(end_tag)) {
+                --depth;
+                if (depth == 0) {
+                    return next_open;
+                }
+                pos = next_open + end_tag.size();
+                continue;
+            }
+            auto close_brace = text.find("}}", next_open + 2);
+            if (close_brace == std::string_view::npos) {
+                return std::string_view::npos;
+            }
+            auto tag_expr = trim(text.substr(next_open + 2, close_brace - (next_open + 2)));
+            if (!tag_expr.empty() && tag_expr[0] == '#') {
+                auto inner = trim(tag_expr.substr(1));
+                if ((kind == "if" && inner.starts_with("if ")) ||
+                    (kind == "each" && inner.starts_with("each ")) ||
+                    (kind == "unless" && inner.starts_with("unless ")) ||
+                    (kind == inner)) {
+                    ++depth;
+                }
+            }
+            pos = close_brace + 2;
+        }
+        return std::string_view::npos;
+    }
+
+    /**
+     * Find top-level {{else}} inside section_content (ignoring {{else}} inside nested sections).
+     */
+    [[nodiscard]] static auto findTopLevelElse(std::string_view section_content) -> std::size_t {
+        int depth = 0;
+        std::size_t pos = 0;
+        while (pos < section_content.size()) {
+            auto next_tag = section_content.find("{{", pos);
+            if (next_tag == std::string_view::npos) {
+                return std::string_view::npos;
+            }
+            auto close_tag = section_content.find("}}", next_tag + 2);
+            if (close_tag == std::string_view::npos) {
+                return std::string_view::npos;
+            }
+            auto tag_expr = trim(section_content.substr(next_tag + 2, close_tag - (next_tag + 2)));
+            if (!tag_expr.empty() && tag_expr[0] == '#') {
+                ++depth;
+            } else if (!tag_expr.empty() && tag_expr[0] == '/') {
+                if (depth > 0) {
+                    --depth;
+                }
+            } else if (depth == 0 && tag_expr == "else") {
+                return next_tag;
+            }
+            pos = close_tag + 2;
+        }
+        return std::string_view::npos;
+    }
+
+    /**
+     * Evaluate a conditional expression (supports variable truthiness and ==, !=, >=, <=, >, <).
+     */
+    [[nodiscard]] auto evaluateCondition(std::string_view cond_expr,
+                                         TemplateObject const& data) const -> bool {
+        auto strip_quotes = [](std::string s) -> std::string {
+            s = trim(s);
+            if (s.size() >= 2 &&
+                ((s.front() == '"' && s.back() == '"') ||
+                 (s.front() == '\'' && s.back() == '\''))) {
+                return s.substr(1, s.size() - 2);
+            }
+            return s;
+        };
+
+        for (std::string_view op : {"==", "!=", ">=", "<=", ">", "<"}) {
+            auto op_pos = cond_expr.find(op);
+            if (op_pos != std::string_view::npos) {
+                auto lhs_key = trim(cond_expr.substr(0, op_pos));
+                auto rhs_raw = trim(cond_expr.substr(op_pos + op.size()));
+                auto lhs_val = getVariable(lhs_key, data);
+                auto rhs_val = (rhs_raw.size() >= 2 && (rhs_raw.front() == '"' || rhs_raw.front() == '\''))
+                                   ? strip_quotes(rhs_raw)
+                                   : (TemplateValue{data}.getProperty(rhs_raw).asString().empty()
+                                          ? strip_quotes(rhs_raw)
+                                          : getVariable(rhs_raw, data));
+                if (op == "==") {
+                    return lhs_val == rhs_val;
+                }
+                if (op == "!=") {
+                    return lhs_val != rhs_val;
+                }
+                try {
+                    double lnum = std::stod(lhs_val);
+                    double rnum = std::stod(rhs_val);
+                    if (op == ">=") return lnum >= rnum;
+                    if (op == "<=") return lnum <= rnum;
+                    if (op == ">") return lnum > rnum;
+                    if (op == "<") return lnum < rnum;
+                } catch (...) {
+                    if (op == ">=") return lhs_val >= rhs_val;
+                    if (op == "<=") return lhs_val <= rhs_val;
+                    if (op == ">") return lhs_val > rhs_val;
+                    if (op == "<") return lhs_val < rhs_val;
+                }
+            }
+        }
+
+        std::string clean_name = std::string(trim(cond_expr));
+        if (clean_name.size() >= 3 && clean_name.substr(0, 3) == "../") {
+            clean_name = clean_name.substr(3);
+        }
+        TemplateValue root{data};
+        return root.getProperty(clean_name).asBool();
+    }
+
+    /**
+     * Process template with full feature support including raw blocks, comments, partials,
+     * depth-balanced nested sections, comparison conditionals, and multi-stage filter pipelines.
      */
     [[nodiscard]] auto processTemplate(std::string_view template_str,
                                        TemplateObject const& data) const -> std::string {
@@ -671,6 +906,19 @@ class CodeGenerator {
 
             // Append text before placeholder
             result << remaining.substr(0, start_pos);
+
+            // Check for raw block {{{{raw}}}}...{{{{/raw}}}}
+            if (remaining.substr(start_pos).starts_with("{{{{raw}}}}")) {
+                constexpr std::string_view raw_open = "{{{{raw}}}}";
+                constexpr std::string_view raw_close = "{{{{/raw}}}}";
+                auto raw_end = remaining.find(raw_close, start_pos + raw_open.size());
+                if (raw_end != std::string_view::npos) {
+                    result << remaining.substr(start_pos + raw_open.size(),
+                                               raw_end - (start_pos + raw_open.size()));
+                    remaining = remaining.substr(raw_end + raw_close.size());
+                    continue;
+                }
+            }
 
             // Check for triple braces {{{variable}}}
             bool is_triple_brace = false;
@@ -692,46 +940,70 @@ class CodeGenerator {
             auto expr_raw = remaining.substr(expr_start, end_pos - expr_start);
             std::string expr = trim(expr_raw);
 
-            // Check if this is a section start {{#name}} or {{#if name}}
+            // 1. Comment {{! ... }}
+            if (!expr.empty() && expr[0] == '!') {
+                remaining = remaining.substr(end_pos + end_delim.length());
+                continue;
+            }
+
+            // 2. Partial {{> partial_name}}
+            if (!expr.empty() && expr[0] == '>') {
+                std::string partial_name = trim(expr.substr(1));
+                auto pit = partials_.find(partial_name);
+                if (pit != partials_.end()) {
+                    result << processTemplate(pit->second, data);
+                }
+                remaining = remaining.substr(end_pos + end_delim.length());
+                continue;
+            }
+
+            // 3. Section start {{#name}}, {{#if expr}}, {{#each name}}, {{#unless expr}}
             if (!expr.empty() && expr[0] == '#') {
                 std::string section_expr = std::string(trim(expr.substr(1)));
                 std::string section_name;
+                std::string section_kind;
                 std::string end_tag;
+                bool invert_section = false;
 
-                // Check for {{#if name}} syntax
                 if (section_expr.size() >= 3 && section_expr.substr(0, 3) == "if ") {
                     section_name = std::string(trim(section_expr.substr(3)));
+                    section_kind = "if";
                     end_tag = "{{/if}}";
+                } else if (section_expr.size() >= 5 && section_expr.substr(0, 5) == "each ") {
+                    section_name = std::string(trim(section_expr.substr(5)));
+                    section_kind = "each";
+                    end_tag = "{{/each}}";
+                } else if (section_expr.size() >= 7 && section_expr.substr(0, 7) == "unless ") {
+                    section_name = std::string(trim(section_expr.substr(7)));
+                    section_kind = "unless";
+                    end_tag = "{{/unless}}";
+                    invert_section = true;
                 } else {
                     section_name = section_expr;
+                    section_kind = section_name;
                     end_tag = "{{/" + section_name + "}}";
                 }
 
-                // Strip ../ prefix if present (parent scope access)
-                // Since we merge parent data when iterating, the variable is already available
                 if (section_name.size() >= 3 && section_name.substr(0, 3) == "../") {
                     section_name = section_name.substr(3);
                 }
 
-                // Find the matching end tag
-                auto section_end = remaining.find(end_tag, end_pos + end_delim.length());
+                auto section_end = findMatchingSectionEnd(
+                    remaining, end_pos + end_delim.length(), section_kind, end_tag);
 
                 if (section_end == std::string_view::npos) {
-                    // No matching end tag - treat as regular variable
                     result << processExpression(expr, data);
                     remaining = remaining.substr(end_pos + end_delim.length());
                     continue;
                 }
 
-                // Extract section content
-                auto section_content = remaining.substr(end_pos + end_delim.length(), section_end - (end_pos + end_delim.length()));
-
-                // Process section
-                result << processSection(section_name, section_content, data);
-
+                auto section_content = remaining.substr(
+                    end_pos + end_delim.length(), section_end - (end_pos + end_delim.length()));
+                result << processSection(section_name, section_kind, section_content, data,
+                                         invert_section);
                 remaining = remaining.substr(section_end + end_tag.length());
             } else {
-                // Regular variable or expression
+                // Regular variable or filter pipeline expression
                 result << processExpression(expr, data);
                 remaining = remaining.substr(end_pos + end_delim.length());
             }
@@ -741,101 +1013,92 @@ class CodeGenerator {
     }
 
     /**
-     * Process a section {{#name}}...{{/name}}
+     * Process a section {{#name}}...{{/name}}, {{#if}}...{{/if}}, {{#each}}...{{/each}}, or {{#unless}}...{{/unless}}
      */
-    [[nodiscard]] auto processSection(std::string const& name, std::string_view section_content,
-                                       TemplateObject const& data) const -> std::string {
-        // Split section content at {{else}} if present
+    [[nodiscard]] auto processSection(std::string const& name, std::string_view kind,
+                                      std::string_view section_content,
+                                      TemplateObject const& data,
+                                      bool invert_section = false) const -> std::string {
         std::string_view true_content = section_content;
         std::string_view false_content = "";
 
-        auto else_pos = section_content.find("{{else}}");
+        auto else_pos = findTopLevelElse(section_content);
         if (else_pos != std::string_view::npos) {
+            auto close_else = section_content.find("}}", else_pos + 2);
             true_content = section_content.substr(0, else_pos);
-            false_content = section_content.substr(else_pos + 8); // Skip "{{else}}"
+            false_content = (close_else != std::string_view::npos)
+                                ? section_content.substr(close_else + 2)
+                                : std::string_view{};
         }
 
-        // Get the value for this section
-        auto it = data.find(name);
-        if (it == data.end()) {
-            // Section variable not found - render false content if available
-            return std::string(processTemplate(false_content, data));
+        if (kind == "if" || invert_section) {
+            const bool cond = evaluateCondition(name, data);
+            const bool take_true = invert_section ? !cond : cond;
+            return std::string(processTemplate(take_true ? true_content : false_content, data));
         }
 
-        TemplateValue const& value = it->second;
+        TemplateValue root{data};
+        TemplateValue value = root.getProperty(name);
 
-        // If it's an array, iterate over it
         if (value.isArray()) {
             auto const& array = value.asArray();
-
-            // Empty array - render false content
             if (array.empty()) {
                 return std::string(processTemplate(false_content, data));
             }
 
             std::ostringstream result;
-
-            for (auto const& item : array) {
-                // If item is an object, merge it with parent data for nested lookups
+            for (std::size_t idx = 0; idx < array.size(); ++idx) {
+                auto const& item = array[idx];
+                TemplateObject merged_data = data;
+                merged_data["@index"] = TemplateValue{idx};
+                merged_data["@index1"] = TemplateValue{idx + 1};
+                merged_data["@first"] = TemplateValue{idx == 0};
+                merged_data["@last"] = TemplateValue{idx + 1 == array.size()};
+                merged_data["@even"] = TemplateValue{(idx % 2) == 0};
+                merged_data["@odd"] = TemplateValue{(idx % 2) == 1};
                 if (item.isObject()) {
-                    TemplateObject merged_data = data;
                     auto const& item_obj = item.asObject();
                     for (auto const& [key, val] : item_obj) {
                         merged_data[key] = val;
                     }
-                    result << processTemplate(true_content, merged_data);
                 } else {
-                    // For non-object items, just pass through parent data
-                    result << processTemplate(true_content, data);
+                    merged_data["."] = item;
                 }
+                result << processTemplate(true_content, merged_data);
             }
-
             return result.str();
         }
 
-        // For boolean values, check the actual bool value (not truthiness)
-        if (value.isBool()) {
-            // For booleans, we need to check the actual bool value, not truthiness
-            // asBool() will return the boolean value directly for bool types
-            bool bool_val = value.asBool();
-            if (bool_val) {
-                return std::string(processTemplate(true_content, data));
-            } else {
-                return std::string(processTemplate(false_content, data));
-            }
-        }
-
-        // For other types (string, int, double), use truthiness
-        // If it's a truthy value (non-empty string, non-zero number),
-        // render true content
         if (value.asBool()) {
             return std::string(processTemplate(true_content, data));
         }
-
-        // Falsy value - render false content
         return std::string(processTemplate(false_content, data));
     }
 
     /**
-     * Process single expression (variable, filter, conditional, etc.)
+     * Process single expression with multi-stage filter chaining ({{var | f1 | f2 | f3}})
      */
     [[nodiscard]] auto processExpression(std::string_view expr, TemplateObject const& data) const
         -> std::string {
-        // Check for filter (contains |)
         auto pipe_pos = expr.find('|');
 
         if (pipe_pos != std::string_view::npos) {
             auto var_name = trim(expr.substr(0, pipe_pos));
-            auto filter_name = trim(expr.substr(pipe_pos + 1));
-
-            // Get variable value
-            auto value = getVariable(var_name, data);
-
-            // Apply filter
-            return filters_->applyFilter(filter_name, value);
+            std::string current = getVariable(var_name, data);
+            std::string_view rest = expr.substr(pipe_pos + 1);
+            while (!rest.empty()) {
+                auto next_pipe = rest.find('|');
+                auto filter_spec =
+                    (next_pipe == std::string_view::npos) ? rest : rest.substr(0, next_pipe);
+                current = filters_->applyFilter(trim(filter_spec), current);
+                if (next_pipe == std::string_view::npos) {
+                    break;
+                }
+                rest = rest.substr(next_pipe + 1);
+            }
+            return current;
         }
 
-        // No filter - just return variable value
         return getVariable(expr, data);
     }
 
@@ -844,8 +1107,6 @@ class CodeGenerator {
      */
     [[nodiscard]] auto getVariable(std::string_view var_name, TemplateObject const& data) const
         -> std::string {
-        // Strip ../ prefix if present (parent scope access)
-        // Since we merge parent data when iterating, the variable is already available
         if (var_name.size() >= 3 && var_name.substr(0, 3) == "../") {
             var_name = var_name.substr(3);
         }
@@ -856,8 +1117,77 @@ class CodeGenerator {
     }
 
     std::shared_ptr<FilterRegistry> filters_;
-    std::string template_; // Stored template for fluent API
-    TemplateObject data_;  // Stored data for fluent API
+    std::string template_;
+    TemplateObject data_;
+    std::unordered_map<std::string, std::string> partials_;
+};
+
+/**
+ * ============================================================================
+ * MultiBackendKernelBuilder - Fluent Structured Code Builder for 5 Backends
+ * (CUDA, CPU Multi-Register SIMD, Vulkan GLSL, Apple MLX, OpenAI Triton)
+ * ============================================================================
+ */
+class MultiBackendKernelBuilder {
+  public:
+    MultiBackendKernelBuilder() = default;
+
+    auto setModelName(std::string name) -> MultiBackendKernelBuilder& {
+        model_name_ = std::move(name);
+        return *this;
+    }
+
+    auto setContextLength(std::size_t ctx_len, std::size_t orig_ctx_len = 131072)
+        -> MultiBackendKernelBuilder& {
+        ctx_len_ = ctx_len;
+        orig_ctx_len_ = orig_ctx_len;
+        return *this;
+    }
+
+    auto setQuantization(std::string weight_quant, std::string kv_quant)
+        -> MultiBackendKernelBuilder& {
+        weight_quant_ = std::move(weight_quant);
+        kv_quant_ = std::move(kv_quant);
+        return *this;
+    }
+
+    auto setRopeScheme(std::string scheme, double scale_factor = 8.0)
+        -> MultiBackendKernelBuilder& {
+        rope_scheme_ = std::move(scheme);
+        rope_scale_ = scale_factor;
+        return *this;
+    }
+
+    [[nodiscard]] auto buildTemplateData() const -> TemplateObject {
+        return TemplateObject{
+            {"model_name", TemplateValue{model_name_}},
+            {"context_length", TemplateValue{ctx_len_}},
+            {"orig_context_length", TemplateValue{orig_ctx_len_}},
+            {"weight_quant", TemplateValue{weight_quant_}},
+            {"kv_quant", TemplateValue{kv_quant_}},
+            {"rope_scheme", TemplateValue{rope_scheme_}},
+            {"rope_scale", TemplateValue{rope_scale_}},
+        };
+    }
+
+    [[nodiscard]] auto renderCustom(std::string_view tmpl,
+                                    TemplateObject extra = {}) const -> std::string {
+        auto data = buildTemplateData();
+        for (auto& [k, v] : extra) {
+            data[k] = std::move(v);
+        }
+        return gen_.render(tmpl, data);
+    }
+
+  private:
+    CodeGenerator gen_;
+    std::string model_name_{"qwen38_27b"};
+    std::size_t ctx_len_{1048576};
+    std::size_t orig_ctx_len_{131072};
+    std::string weight_quant_{"llq_fused"};
+    std::string kv_quant_{"llq_fused"};
+    std::string rope_scheme_{"yarn"};
+    double rope_scale_{8.0};
 };
 
 } // namespace logger::codegen
