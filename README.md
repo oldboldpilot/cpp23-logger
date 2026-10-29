@@ -167,7 +167,10 @@ auto const result = log.writeRecord(logger::LogLevel::INFO, R"({"msg":"started"}
 
 `writeRecord()` never throws and returns `RecordWrite::Written`, `Filtered`, `Rejected` (the line
 holds a newline) or `SinkFailed`. `getSinkStats()` reports the counters and the last error. Existing
-code that sets none of these options behaves exactly as before. See [docs/API.md](docs/API.md).
+code that sets none of these options behaves exactly as before. In particular a TEXT-format log
+never rotates unless `LoggerConfig::rotate_text` is true: it is off by default so that upgrading does not
+start rotating (and discarding old entries past `max_backup_files`) logs that grew without bound
+before. JSON records always rotate, and an explicit `rotate()` call rotates either format. See [docs/API.md](docs/API.md).
 
 ### Building from Source
 

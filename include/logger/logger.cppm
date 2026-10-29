@@ -360,6 +360,10 @@ struct SinkStats {
  * - announce_initialization: Print the "Logger initialized" line
  *                            Default: true. false prints nothing
  *
+ * - rotate_text: Rotate TEXT-format logs at the size bound
+ *                Default: false (a TEXT log never rotates, as before rotation existed)
+ *                JSON records always rotate; an explicit rotate() call rotates either way
+ *
  * - async_logging: Enable asynchronous logging (background thread)
  *                  Default: false (synchronous)
  *                  Note: Not yet implemented (future feature)
@@ -389,6 +393,7 @@ struct LoggerConfig {
     bool file_output{true};
     ConsoleStream console_stream{ConsoleStream::Stdout};
     bool announce_initialization{true};
+    bool rotate_text{false};
 };
 
 /**
@@ -2090,6 +2095,7 @@ class Logger::Impl {
         format = config.format;
         console_stream = config.console_stream;
         file_output = config.file_output;
+        rotate_text = config.rotate_text;
         max_backups = config.max_backup_files;
         max_bytes = config.max_file_bytes != 0
                         ? config.max_file_bytes
@@ -2169,7 +2175,7 @@ class Logger::Impl {
             entry.push_back('\n');
 
             std::lock_guard<std::mutex> lock(mutex_);
-            auto const ok = !file_output || (ensureOpenLocked() && appendLocked(entry));
+            auto const ok = !file_output || (ensureOpenLocked() && appendLocked(entry, true));
             if (console_enabled) {
                 consoleStream() << entry << std::flush;
             }
@@ -2313,7 +2319,7 @@ class Logger::Impl {
         // Output to file (no colors)
         if (!file_output) {
             ++written;
-        } else if (ensureOpenLocked() && appendLocked(file_entry)) {
+        } else if (ensureOpenLocked() && appendLocked(file_entry, rotate_text)) {
             ++written;
         } else {
             ++stats.failed;
@@ -2405,9 +2411,9 @@ class Logger::Impl {
     }
 
     /// Writes `data` (already newline-terminated) as one write call, rotating first when it
-    /// would pass the size bound. Requires mutex_ and an open file.
-    [[nodiscard]] auto appendLocked(std::string_view data) -> bool {
-        if (max_bytes != 0 && file_size > 0 && file_size + data.size() > max_bytes) {
+    /// would pass the size bound and `may_rotate` is set. Requires mutex_ and an open file.
+    [[nodiscard]] auto appendLocked(std::string_view data, bool may_rotate) -> bool {
+        if (may_rotate && max_bytes != 0 && file_size > 0 && file_size + data.size() > max_bytes) {
             if (!rotateLocked()) {
                 ++stats.failed;
             }
@@ -2512,6 +2518,7 @@ class Logger::Impl {
     bool initialized;
     LogFormat format{LogFormat::TEXT};
     ConsoleStream console_stream{ConsoleStream::Stdout};
+    bool rotate_text{false}; // TEXT entries rotate only when asked; records always do
     bool file_output{false}; // false until initialize(): an uninitialised logger is console-only
     std::string log_path;
     std::uintmax_t max_bytes{0};

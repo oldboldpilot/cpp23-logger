@@ -377,6 +377,7 @@ auto test_old_defaults_unchanged(fs::path const& dir) -> void {
     assert(defaults.max_file_bytes == 0);
     assert(defaults.format == LogFormat::TEXT);
     assert(defaults.console_output && defaults.console_color);
+    assert(!defaults.rotate_text);
     assert(defaults.max_file_size_mb == 100 && defaults.max_backup_files == 5);
 
     auto& log = Logger::getInstance();
@@ -458,6 +459,66 @@ auto test_level_changes_under_concurrent_logging(fs::path const& dir) -> void {
     std::cout << "  ✓ passed\n";
 }
 
+auto textConfig(fs::path const& file, bool rotate_text) -> LoggerConfig {
+    LoggerConfig c;
+    c.log_file_path = file.string();
+    c.min_level = LogLevel::INFO;
+    c.console_output = false;
+    c.announce_initialization = false;
+    c.max_file_bytes = 200;
+    c.max_backup_files = 2;
+    c.rotate_text = rotate_text;
+    return c;
+}
+
+auto test_text_rotation_is_opt_in(fs::path const& dir) -> void {
+    std::cout << "Testing TEXT rotation is opt-in...\n";
+    auto& log = Logger::getInstance();
+
+    auto const off = dir / "text_off.log";
+    log.initialize(textConfig(off, false));
+    for (int i = 0; i < 40; ++i) {
+        log.info("text line {}", i);
+    }
+    assert(fs::file_size(off) > 200);
+    assert(!fs::exists(backup(off, 1)));
+    assert(log.getSinkStats().rotations == 0);
+
+    auto const on = dir / "text_on.log";
+    log.initialize(textConfig(on, true));
+    for (int i = 0; i < 40; ++i) {
+        log.info("text line {}", i);
+    }
+    assert(fs::exists(backup(on, 1)));
+    assert(fs::file_size(on) <= 200);
+    assert(log.getSinkStats().rotations > 0);
+
+    // Explicit rotate() rotates a TEXT log even with the flag off.
+    auto const manual = dir / "text_manual.log";
+    log.initialize(textConfig(manual, false));
+    log.info("one line");
+    log.rotate();
+    assert(fs::exists(backup(manual, 1)));
+    std::cout << "  ✓ passed\n";
+}
+
+auto test_json_rotates_regardless_of_rotate_text(fs::path const& dir) -> void {
+    std::cout << "Testing JSON records rotate regardless of rotate_text...\n";
+    auto& log = Logger::getInstance();
+    for (bool const flag : {false, true}) {
+        auto const file = dir / std::format("json_flag_{}.jsonl", flag);
+        auto cfg = jsonConfig(file);
+        cfg.max_file_bytes = 60;
+        cfg.max_backup_files = 2;
+        cfg.rotate_text = flag;
+        log.initialize(cfg);
+        writeSeq(log, 1, 11);
+        assert(fs::exists(backup(file, 1)));
+        assert(log.getSinkStats().rotations == 5);
+    }
+    std::cout << "  ✓ passed\n";
+}
+
 } // namespace
 
 auto main() -> int {
@@ -473,6 +534,8 @@ auto main() -> int {
     test_console_stream_stderr(dir);
     test_announce_initialization_false(dir);
     test_file_output_false(dir);
+    test_text_rotation_is_opt_in(dir);
+    test_json_rotates_regardless_of_rotate_text(dir);
     test_old_defaults_unchanged(dir);
     test_level_changes_under_concurrent_logging(dir);
 
