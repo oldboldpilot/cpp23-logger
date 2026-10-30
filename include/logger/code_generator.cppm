@@ -13,6 +13,8 @@
  * - Loop support: {{#each}}...{{/each}} with index access
  * - Nested data: Support for dot notation (object.property.subproperty)
  * - Code formatters: indent, wrap, escape, quote, comment
+ * - Literal-safe filters: cpp_string, python_string / json_string (string literal bodies that
+ *   escape every control byte), c_ident / safe_ident (never empty, never a leading digit)
  * - Built-in helpers: join, split, replace, trim, pad
  * - Comments: {{! comment text }}
  * - Raw blocks: {{{{raw}}}}...{{{{/raw}}}} for literal text
@@ -350,13 +352,17 @@ inline constexpr long kCxxStandardVersion = __cplusplus;
 }
 
 /**
- * Escape special characters for C++ strings
+ * The body of a C/C++ double-quoted string literal: backslash and quote escaped, \n \r \t named,
+ * and EVERY other control byte (0x00-0x1F, 0x7F) as a three-digit octal escape, so a following
+ * digit can never extend it (a hex escape would swallow a following hex digit). Bytes >= 0x80
+ * pass through unchanged (UTF-8 source).
  */
 [[nodiscard]] inline auto escape(std::string_view str) -> std::string {
     std::string result;
-    result.reserve(str.size() * 2); // Worst case: all chars need escaping
+    result.reserve(str.size() * 2);
 
     for (char c : str) {
+        const auto u = static_cast<unsigned char>(c);
         switch (c) {
             case '\\':
                 result += "\\\\";
@@ -374,7 +380,70 @@ inline constexpr long kCxxStandardVersion = __cplusplus;
                 result += "\\t";
                 break;
             default:
-                result += c;
+                if (u < 0x20 || u == 0x7f) {
+                    result += '\\';
+                    result += static_cast<char>('0' + ((u >> 6) & 7));
+                    result += static_cast<char>('0' + ((u >> 3) & 7));
+                    result += static_cast<char>('0' + (u & 7));
+                } else {
+                    result += c;
+                }
+        }
+    }
+
+    return result;
+}
+
+/**
+ * The body of a C++ double-quoted string literal (the `cpp_string` filter): `escape`.
+ */
+[[nodiscard]] inline auto cppString(std::string_view str) -> std::string {
+    return escape(str);
+}
+
+/**
+ * The body of a double-quoted Python string literal that is ALSO a valid JSON string body
+ * (the `python_string` / `json_string` filters): backslash and quote escaped, \n \r \t \b \f
+ * named, and every other control byte (0x00-0x1F, 0x7F) as \u00XX, the one escape form both
+ * languages read identically. Bytes >= 0x80 pass through unchanged (UTF-8 source).
+ */
+[[nodiscard]] inline auto pythonString(std::string_view str) -> std::string {
+    static constexpr std::string_view kHex = "0123456789abcdef";
+    std::string result;
+    result.reserve(str.size() * 2);
+
+    for (char c : str) {
+        const auto u = static_cast<unsigned char>(c);
+        switch (c) {
+            case '\\':
+                result += "\\\\";
+                break;
+            case '\"':
+                result += "\\\"";
+                break;
+            case '\n':
+                result += "\\n";
+                break;
+            case '\r':
+                result += "\\r";
+                break;
+            case '\t':
+                result += "\\t";
+                break;
+            case '\b':
+                result += "\\b";
+                break;
+            case '\f':
+                result += "\\f";
+                break;
+            default:
+                if (u < 0x20 || u == 0x7f) {
+                    result += "\\u00";
+                    result += kHex[u >> 4];
+                    result += kHex[u & 0xf];
+                } else {
+                    result += c;
+                }
         }
     }
 
@@ -731,11 +800,15 @@ struct ReflectedKernelConfig {
 };
 
 /**
- * Convert string to valid C/C++/CUDA/GLSL/Python identifier (replaces non-alnum with '_')
+ * A valid C/C++/CUDA/GLSL/Python identifier: every byte outside [A-Za-z0-9_] becomes '_', an
+ * empty result becomes `empty_name`, and a leading digit gets `digit_prefix` in front. Never
+ * empty and never starting with a digit (given a non-empty `empty_name` that does not start with a
+ * digit, and a non-empty `digit_prefix` that does not start with one either).
  */
-[[nodiscard]] inline auto toCIdentifier(std::string_view str) -> std::string {
+[[nodiscard]] inline auto safeIdentifier(std::string_view str, std::string_view empty_name = "_",
+                                         std::string_view digit_prefix = "_") -> std::string {
     std::string result;
-    result.reserve(str.size());
+    result.reserve(str.size() + digit_prefix.size());
     for (char c : str) {
         if (std::isalnum(static_cast<unsigned char>(c)) != 0 || c == '_') {
             result += c;
@@ -743,10 +816,21 @@ struct ReflectedKernelConfig {
             result += '_';
         }
     }
-    if (!result.empty() && (std::isdigit(static_cast<unsigned char>(result[0])) != 0)) {
-        result.insert(result.begin(), '_');
+    if (result.empty()) {
+        return std::string(empty_name);
+    }
+    if (std::isdigit(static_cast<unsigned char>(result[0])) != 0) {
+        result.insert(0, digit_prefix);
     }
     return result;
+}
+
+/**
+ * Convert string to valid C/C++/CUDA/GLSL/Python identifier (the `c_ident` and `safe_ident`
+ * filters): `safeIdentifier` with its defaults, so empty input yields "_".
+ */
+[[nodiscard]] inline auto toCIdentifier(std::string_view str) -> std::string {
+    return safeIdentifier(str);
 }
 
 /**
@@ -837,8 +921,12 @@ class FilterRegistry {
         registerFilter("SCREAMING_SNAKE_CASE", toScreamingSnakeCase);
         registerFilter("SCREAMING_SNAKE", toScreamingSnakeCase);
         registerFilter("c_ident", toCIdentifier);
+        registerFilter("safe_ident", toCIdentifier);
         registerFilter("trim", trim);
         registerFilter("escape", escape);
+        registerFilter("cpp_string", cppString);
+        registerFilter("python_string", pythonString);
+        registerFilter("json_string", pythonString);
         registerFilter("quote", quote);
         registerFilter("cpp_comment", cppComment);
         registerFilter("glsl_comment", cppComment);
