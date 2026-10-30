@@ -563,6 +563,7 @@ auto test_failed_rename_truncates_live_file(fs::path const& dir) -> void {
     cfg.max_backup_files = 1;
     log.initialize(cfg);
     writeSeq(log, 1, 11);
+    // After a failed rotation the next attempt waits a second, but the live file is still truncated at the bound.
     check(fs::file_size(file) <= 60); // bounded, not growing past the bound
     check(log.getSinkStats().rotations == 0); // no rotation succeeded
     check(log.getSinkStats().failed > 0);

@@ -173,6 +173,13 @@ to true. It is off by default so that upgrading does not start rotating (and dis
 `max_backup_files`) logs that grew without bound before. JSON records always rotate, and an explicit
 `rotate()` call rotates either format. See [docs/API.md](docs/API.md).
 
+`SinkStats::written` counts every record or entry that reached its sink, including a console-only write
+(`file_output` false). `SinkStats::rotations` counts only rotations in which every step worked. After a
+failed rotation the next attempt waits one second, so a file that cannot be renamed is not retried on every
+write; the file is still kept within its size bound meanwhile. `initialize()` and a successful `rotate()`
+clear that wait. A write whose code throws is counted in `SinkStats::failed`, keeps its
+reason in `SinkStats::last_error` and falls back to `std::cerr` when the console is off.
+
 ### Building from Source
 
 ```bash
@@ -268,6 +275,7 @@ cmake --build build
 ctest --test-dir build
 ```
 
+`tests/test_logger_records.cpp` covers the rotation-failure accounting, console-only counting and the exception path.
 `tests/test_jsonl_sink.cpp` covers the JSONL sink, rotation, the console stream and the level race.
 It needs Clang and the std module PCM. To make its concurrency check detect a data race, configure
 with `-DCMAKE_CXX_FLAGS=-fsanitize=thread` and link with the same flag.

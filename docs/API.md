@@ -206,7 +206,9 @@ exactly as before JSON records existed (it never rotates) unless `rotate_text` i
 is false because existing consumers must not start rotating, and dropping old entries past
 `max_backup_files`, on upgrade. An explicit `rotate()` call rotates whatever the format. If the
 live file cannot be renamed to `path.1`, it is truncated so it stays bounded, the failure is
-counted once in `SinkStats::failed`, and `SinkStats::rotations` counts only rotations that succeeded.
+counted once in `SinkStats::failed`, and `SinkStats::rotations` counts only rotations that
+succeeded. After a failed rotation the next attempt waits one second; the live file is still
+truncated at the size bound meanwhile. `initialize()` and a successful `rotate()` clear that wait.
 
 When a file is opened and its last byte is not `'\n'` (a torn last line after a crash), a newline is
 written first so the next record starts on its own line.

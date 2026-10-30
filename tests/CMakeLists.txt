@@ -7,6 +7,10 @@ add_executable(test_logger test_logger.cpp)
 target_link_libraries(test_logger PRIVATE logger)
 target_compile_options(test_logger PRIVATE -UNDEBUG)
 
+add_executable(test_logger_records test_logger_records.cpp)
+target_link_libraries(test_logger_records PRIVATE logger)
+target_compile_options(test_logger_records PRIVATE -UNDEBUG)
+
 add_executable(test_nested_templates test_nested_templates.cpp)
 target_link_libraries(test_nested_templates PRIVATE logger)
 target_compile_options(test_nested_templates PRIVATE -UNDEBUG)
@@ -74,6 +78,7 @@ else()
 endif()
 
 add_test(NAME test_logger COMMAND test_logger)
+add_test(NAME test_logger_records COMMAND test_logger_records)
 add_test(NAME test_nested_templates COMMAND test_nested_templates)
 add_test(NAME test_functional_templates COMMAND test_functional_templates)
 add_test(NAME test_codegen_filters COMMAND test_codegen_filters)

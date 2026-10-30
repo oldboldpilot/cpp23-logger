@@ -2104,6 +2104,8 @@ class Logger::Impl {
         file_size = 0;
         stats = SinkStats{};
         written = 0;
+        rotation_failed = false;
+        last_rotation_attempt = {};
         last_open_attempt = std::chrono::steady_clock::now();
 
         if (file_output) {
@@ -2205,8 +2207,12 @@ class Logger::Impl {
 
     auto rotate() -> void {
         std::lock_guard<std::mutex> lock(mutex_);
-        if (file_output && !rotateLocked()) {
-            ++stats.failed;
+        if (file_output) {
+            if (rotateLocked()) {
+                rotation_failed = false;
+            } else {
+                ++stats.failed;
+            }
         }
     }
 
@@ -2412,11 +2418,26 @@ class Logger::Impl {
     /// Writes `data` (already newline-terminated) as one write call, rotating first when it
     /// would pass the size bound and `may_rotate` is set. Requires mutex_ and an open file.
     [[nodiscard]] auto appendLocked(std::string_view data, bool may_rotate) -> bool {
-        auto rotation_failed = false;
-        if (may_rotate && max_bytes != 0 && file_size > 0 && file_size + data.size() > max_bytes) {
-            rotation_failed = !rotateLocked();
+        auto rotation_failed_now = false;
+        auto const over = may_rotate && max_bytes != 0 && file_size > 0 && file_size + data.size() > max_bytes;
+        auto const now = std::chrono::steady_clock::now();
+        // After a failed rotation the next attempt waits a second: the file is not renamed again and again.
+        if (over && (!rotation_failed || now - last_rotation_attempt >= std::chrono::seconds(1))) {
+            rotation_failed_now = !rotateLocked();
+            rotation_failed = rotation_failed_now;
+            last_rotation_attempt = now;
             if (!log_file.is_open()) {
                 return false; // the caller counts this line as failed, which covers the rotation
+            }
+        } else if (over) {
+            // Waiting after a failed rename: no rename and no new count, but the file stays bounded.
+            log_file.close();
+            log_file.clear();
+            {
+                std::ofstream truncate(log_path, std::ios::trunc);
+            }
+            if (!openFileLocked()) {
+                return false;
             }
         }
         log_file.write(data.data(), static_cast<std::streamsize>(data.size()));
@@ -2429,7 +2450,7 @@ class Logger::Impl {
             return false;
         }
         file_size += data.size();
-        if (rotation_failed) {
+        if (rotation_failed_now) {
             ++stats.failed; // counted once: only when the caller sees the line written
         }
         return true;
@@ -2534,6 +2555,8 @@ class Logger::Impl {
     std::atomic<std::uintmax_t> file_size{0}; // written under mutex_, read lock-free
     std::atomic<std::uint64_t> written{0};
     SinkStats stats;
+    bool rotation_failed{false};
+    std::chrono::steady_clock::time_point last_rotation_attempt{};
     std::chrono::steady_clock::time_point last_open_attempt{};
     std::ofstream log_file;
     mutable std::mutex mutex_; // Thread-safety (mutable for const methods)

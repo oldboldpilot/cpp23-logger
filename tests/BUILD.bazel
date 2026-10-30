@@ -17,3 +17,19 @@ cc_test(
         "//:logger",
     ],
 )
+
+cc_test(
+    name = "test_logger_records",
+    srcs = ["test_logger_records.cpp"],
+    copts = [
+        "-std=c++23",
+        "-stdlib=libc++",
+    ],
+    linkopts = [
+        "-lc++",
+        "-lpthread",
+    ],
+    deps = [
+        "//:logger",
+    ],
+)
