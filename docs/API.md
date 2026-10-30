@@ -122,8 +122,9 @@ Results:
 - `RecordWrite::Rejected`: the line contains `'\n'` (counted in `SinkStats::rejected`).
 - `RecordWrite::SinkFailed`: the file could not be opened, written or rotated. It is counted in
   `SinkStats::failed`, `SinkStats::last_error` holds the `std::error_code` message (never record
-  content), and the line is written once to `std::cerr` if the console is off. The file is reopened
-  at most once per second after a failure.
+  content; for an open failure it is the reason the open reported, e.g. permission denied, not a
+  directory or is a directory), and the line is written once to `std::cerr` if the console is
+  off. The file is reopened at most once per second after a failure.
 
 The logger does not serialise anything: the caller builds the JSON object. In `LogFormat::JSON` the
 text methods (`info()`, `warn()`, ...) are refused and counted in `SinkStats::rejected`, so the file

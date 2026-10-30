@@ -11,6 +11,10 @@
  * In a normal build it still checks that no record is lost, torn or double counted.
  */
 
+#if defined(__unix__) || defined(__APPLE__)
+#include <unistd.h>
+#endif
+
 import std;
 import logger;
 
@@ -244,6 +248,7 @@ auto test_sink_failure_is_a_value(fs::path const& dir) -> void {
         log.initialize(cfg);
     }
     auto const failed_after_init = log.getSinkStats().failed;
+    check(log.getSinkStats().last_error == std::make_error_code(std::errc::not_a_directory).message());
     check(failed_after_init >= 1);
 
     auto const line = std::string(R"({"msg":"must survive"})");
@@ -270,9 +275,27 @@ auto test_sink_failure_is_a_value(fs::path const& dir) -> void {
         auto const open_stats = log.getSinkStats();
         check(open_stats.failed == 1);
         check(!open_stats.last_error.empty());
+        check(open_stats.last_error == std::make_error_code(std::errc::is_a_directory).message());
         check(log.writeRecord(LogLevel::INFO, line) == RecordWrite::SinkFailed);
         check(log.getSinkStats().failed == 2);
     }
+
+    // A directory the process may not write to: open() reports permission denied, not a bare I/O error.
+    // Root ignores directory permissions, so the check is skipped there.
+#if defined(__unix__) || defined(__APPLE__)
+    if (::geteuid() != 0) {
+        auto const locked = dir / "locked";
+        fs::create_directories(locked);
+        fs::permissions(locked, fs::perms::owner_read | fs::perms::owner_exec);
+        {
+            Capture init_noise(std::cerr);
+            log.initialize(jsonConfig(locked / "x.jsonl"));
+        }
+        auto const denied = log.getSinkStats().last_error;
+        fs::permissions(locked, fs::perms::owner_all);
+        check(denied == std::make_error_code(std::errc::permission_denied).message());
+    }
+#endif
 
     // With the console on there is no second copy on stderr.
     cfg.console_output = true;

@@ -118,6 +118,7 @@ module;
 
 #include <array>
 #include <atomic>
+#include <cerrno>
 #include <charconv>
 #include <chrono>
 #include <concepts>
@@ -2386,9 +2387,31 @@ class Logger::Impl {
         if (format == LogFormat::JSON) {
             mode |= std::ios::binary;
         }
+        errno = 0;
         log_file.open(log_path, mode);
         if (!log_file.is_open()) {
-            setError(std::make_error_code(std::errc::io_error));
+            // Keep the real reason: a bare io_error would hide why the open failed.
+            auto const open_errno = errno;
+            auto reason = std::make_error_code(std::errc::io_error);
+            if (open_errno != 0) {
+                reason = std::error_code(open_errno, std::generic_category());
+            } else {
+                std::error_code probe;
+                auto const parent = std::filesystem::path(log_path).parent_path();
+                if (!parent.empty()) {
+                    auto const parent_status = std::filesystem::status(parent, probe);
+                    if (probe) {
+                        reason = probe;
+                    } else if (!std::filesystem::is_directory(parent_status)) {
+                        reason = std::make_error_code(std::errc::not_a_directory);
+                    }
+                }
+                if (reason == std::make_error_code(std::errc::io_error) &&
+                    std::filesystem::is_directory(log_path, probe)) {
+                    reason = std::make_error_code(std::errc::is_a_directory);
+                }
+            }
+            setError(reason);
             file_size = 0;
             return false;
         }
