@@ -23,6 +23,10 @@ add_executable(test_codegen_filters test_codegen_filters.cpp)
 target_link_libraries(test_codegen_filters PRIVATE logger)
 target_compile_options(test_codegen_filters PRIVATE -UNDEBUG)
 
+add_executable(test_kernel_namespace test_kernel_namespace.cpp)
+target_link_libraries(test_kernel_namespace PRIVATE logger)
+target_compile_options(test_kernel_namespace PRIVATE -UNDEBUG)
+
 # Test std module binary compatibility with logger
 if(CMAKE_CXX_COMPILER_ID MATCHES "Clang" AND TARGET build_logger_std_modules)
     add_executable(test_std_module test_std_module.cpp)
@@ -82,6 +86,7 @@ add_test(NAME test_logger_records COMMAND test_logger_records)
 add_test(NAME test_nested_templates COMMAND test_nested_templates)
 add_test(NAME test_functional_templates COMMAND test_functional_templates)
 add_test(NAME test_codegen_filters COMMAND test_codegen_filters)
+add_test(NAME test_kernel_namespace COMMAND test_kernel_namespace)
 
 # ============================================================================
 # The documentation citation gate's OWN gate

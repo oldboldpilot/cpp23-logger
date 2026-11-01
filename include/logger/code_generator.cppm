@@ -834,6 +834,19 @@ struct ReflectedKernelConfig {
 }
 
 /**
+ * Convert string to a valid C++ qualified name: `toCIdentifier` over each `::`-separated part, so
+ * no part is ever empty and a caller's text can never leave the name it is written into.
+ */
+[[nodiscard]] inline auto toQualifiedIdentifier(std::string_view str) -> std::string {
+    std::string result;
+    for (auto sep = str.find("::"); sep != std::string_view::npos; sep = str.find("::")) {
+        result += toCIdentifier(str.substr(0, sep)) + "::";
+        str.remove_prefix(sep + 2);
+    }
+    return result + toCIdentifier(str);
+}
+
+/**
  * Create Doxygen / JSDoc block comment
  */
 [[nodiscard]] inline auto docComment(std::string_view str) -> std::string {
@@ -1636,6 +1649,15 @@ class MultiBackendKernelBuilder {
         return *this;
     }
 
+    /// The namespace the CUDA and CPU SIMD kernels are emitted under, as `a::b`: they land in
+    /// `a::b::cuda` and `a::b::cpu_simd`. It is the caller's name, so this library holds none but
+    /// its own default. Text that is not a qualified name is made into one
+    /// (`toQualifiedIdentifier`).
+    auto setGeneratedNamespace(std::string_view ns) -> MultiBackendKernelBuilder& {
+        generated_namespace_ = toQualifiedIdentifier(ns);
+        return *this;
+    }
+
     auto registerFilter(std::string name, FilterFunction filter) -> MultiBackendKernelBuilder& {
         gen_.registerFilter(std::move(name), std::move(filter));
         return *this;
@@ -1643,6 +1665,7 @@ class MultiBackendKernelBuilder {
 
     [[nodiscard]] auto buildTemplateData() const -> TemplateObject {
         return TemplateObject{
+            {"generated_namespace", TemplateValue{generated_namespace_}},
             {"model_name", TemplateValue{model_name_}},
             {"family", TemplateValue{arch_family_}},
             {"hidden_size", TemplateValue{hidden_size_}},
@@ -1694,7 +1717,7 @@ class MultiBackendKernelBuilder {
         static constexpr std::string_view kCudaTemplate = R"TMPL(// CUDA 1M-Context Kernel ({{model_name | c_ident}}, {{rope_scheme | upper}}, {{weight_quant}}/{{kv_quant}})
 #include <cuda_fp16.h>
 #include <cstdint>
-namespace sensen::generated::cuda {
+namespace {{generated_namespace}}::cuda {
 static constexpr std::size_t kContextLength = {{context_length}};
 static constexpr std::size_t kOrigContextLength = {{orig_context_length}};
 static constexpr double kRopeScale = {{rope_scale}};
@@ -1702,7 +1725,7 @@ static constexpr double kRopeScale = {{rope_scale}};
     const std::size_t tid = static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
     if (tid < {{head_dim}}) { q[tid] *= static_cast<float>({{mscale}}); }
 }
-} // namespace sensen::generated::cuda
+} // namespace {{generated_namespace}}::cuda
 )TMPL";
         return renderCustom(kCudaTemplate);
     }
@@ -1711,7 +1734,7 @@ static constexpr double kRopeScale = {{rope_scale}};
         static constexpr std::string_view kCpuSimdTemplate = R"TMPL(// CPU Multi-Register SIMD (AVX-512 / AVX2 / AMX / NEON) 1M-Context Kernel ({{model_name | c_ident}})
 #include <immintrin.h>
 #include <cstddef>
-namespace sensen::generated::cpu_simd {
+namespace {{generated_namespace}}::cpu_simd {
 static constexpr std::size_t kContextLength = {{context_length}};
 {{model_name | c_ident | simd_avx512_attr}} void run_avx512_multiregister(float* dst, const float* src, std::size_t n) noexcept {
     std::size_t i = 0;
@@ -1726,7 +1749,7 @@ static constexpr std::size_t kContextLength = {{context_length}};
         _mm512_storeu_ps(dst + i + 48, z3);
     }
 }
-} // namespace sensen::generated::cpu_simd
+} // namespace {{generated_namespace}}::cpu_simd
 )TMPL";
         return renderCustom(kCpuSimdTemplate);
     }
@@ -1780,6 +1803,7 @@ KV_QUANT = "{{kv_quant}}"
 
   private:
     CodeGenerator gen_;
+    std::string generated_namespace_{"logger::generated"};
     std::string model_name_{"qwen38_27b"};
     std::string arch_family_{"qwen3_5"};
     std::size_t hidden_size_{5120};
